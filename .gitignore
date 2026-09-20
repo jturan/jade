@@ -1,0 +1,15 @@
+# Build output
+/jade
+/dist/
+
+# Local, machine-specific config — never committed
+config.yml
+*.local.yml
+
+# Telemetry
+*.jsonl
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp
