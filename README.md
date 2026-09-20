@@ -91,6 +91,23 @@ jade doctor
 jade init
 ```
 
+## Claude Code plugin (optional)
+
+jade is a terminal tool first. If you also work inside Claude Code, an optional
+plugin adds `/jade-discovery`, `/jade-plan`, `/jade-build` and `/jade-status`:
+
+```sh
+claude plugin marketplace add jturan/jade
+claude plugin install jade@jade
+```
+
+The skills contain **no prompt content** — they shell out to the binary, so
+there is exactly one copy of every prompt and it lives in jade. Deleting the
+plugin breaks nothing; everything remains usable from the terminal.
+
+It also installs a `Stop` hook that notifies through herdr when a Claude Code
+session goes idle, so an orchestrator pane left running does not wait silently.
+
 ## License
 
 MIT

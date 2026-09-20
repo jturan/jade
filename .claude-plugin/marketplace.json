@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "jade",
+  "owner": {
+    "name": "Jason Turan"
+  },
+  "plugins": [
+    {
+      "name": "jade",
+      "description": "Slash commands for the jade CLI: discovery, planning, and the unattended build loop. Requires the jade binary.",
+      "source": "./plugin",
+      "category": "productivity"
+    }
+  ],
+  "description": "Slash commands for jade, a CLI that orchestrates AI coding agents from idea to merged pull request."
+}
