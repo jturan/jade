@@ -167,6 +167,41 @@ in a Claude Code session in the `orchestrator` tab. Then "what's next?" and
 "build the next unit" work as English, and the skills shell out to the same jade
 commands. You get the ergonomics without paying for a stateful orchestrator.
 
+## Letting units merge themselves
+
+Some work does not need your eyes. `autonomy` is a dial, set per unit at plan
+time alongside the security-review call:
+
+| Level | Behaviour |
+|---|---|
+| `gated` | The default. You approve the plan and every merge. |
+| `merge` | Auto-merges on a clean run; the plan gate still applies. |
+| `full` | Also auto-applies the plan. `--yolo` is an alias. |
+
+Override for a whole run with `jade build --autonomy merge`, and chain units
+with `--all`.
+
+**The guardrails matter more than the dial.** A unit will not merge itself if:
+
+- it was flagged for security review;
+- a reviewer raised blocking findings;
+- the builder did not run the tests;
+- **it needed a retry** — a unit that struggled has earned your eyes, whatever
+  was decided before anyone knew it would struggle;
+- it touches a protected path (migrations, auth, CI, secrets, deploy manifests
+  by default; set `protected_paths` per profile to change that);
+- the run has already merged `--max-auto-merges` units (default 3), so a bad
+  plan cannot land nine pull requests while you are at lunch.
+
+Every merge decision is reported, including the ones that go ahead, and an
+automatic merge leaves a comment on the issue saying why. A silent auto-merge is
+indistinguishable from a bug.
+
+`jade build --explain` shows what would happen before anything is dispatched.
+
+**Deployment is not on this dial.** Merging to main is reversible; a production
+deploy often is not. jade stops at the merge.
+
 ## Stopping and resuming elsewhere
 
 Because state lives in GitHub, there is no such thing as losing your place. Close

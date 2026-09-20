@@ -114,6 +114,28 @@ func (r *Repo) Diff(ctx context.Context, base string) (string, error) {
 	return r.git(ctx, "diff", base+"...HEAD")
 }
 
+// ChangedFiles lists the paths this branch changes relative to base, for the
+// autonomy guardrails to inspect.
+func (r *Repo) ChangedFiles(ctx context.Context, base string) ([]string, error) {
+	out, err := r.git(ctx, "diff", "--name-only", base+"...HEAD")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// MergePR merges a pull request and deletes its branch.
+func (r *Repo) MergePR(ctx context.Context, url string) error {
+	_, stderr, err := r.run(ctx, "gh", "pr", "merge", url, "--squash", "--delete-branch")
+	if err != nil {
+		return fmt.Errorf("gh pr merge: %s", strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
 // CreatePR opens a pull request and returns its URL.
 func (r *Repo) CreatePR(ctx context.Context, title, body, base string) (string, error) {
 	stdout, stderr, err := r.run(ctx, "gh", "pr", "create",

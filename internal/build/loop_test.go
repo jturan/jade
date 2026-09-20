@@ -61,14 +61,16 @@ func (f *fakeAgent) dispatchedRoles() []config.Role {
 }
 
 type fakeGit struct {
-	clean      bool
-	changes    bool
-	committed  []string
-	pushed     []string
-	prCreated  bool
-	prTitle    string
-	prBody     string
-	checkedOut string
+	clean        bool
+	changes      bool
+	changedFiles []string
+	merged       []string
+	committed    []string
+	pushed       []string
+	prCreated    bool
+	prTitle      string
+	prBody       string
+	checkedOut   string
 }
 
 func (g *fakeGit) IsClean(context.Context) (bool, error)         { return g.clean, nil }
@@ -80,6 +82,16 @@ func (g *fakeGit) CommitAll(_ context.Context, m string) error {
 	return nil
 }
 func (g *fakeGit) Push(_ context.Context, b string) error { g.pushed = append(g.pushed, b); return nil }
+func (g *fakeGit) ChangedFiles(context.Context, string) ([]string, error) {
+	if g.changedFiles == nil {
+		return []string{"internal/thing.go"}, nil
+	}
+	return g.changedFiles, nil
+}
+func (g *fakeGit) MergePR(_ context.Context, url string) error {
+	g.merged = append(g.merged, url)
+	return nil
+}
 func (g *fakeGit) CreatePR(_ context.Context, t, b, _ string) (string, error) {
 	g.prCreated, g.prTitle, g.prBody = true, t, b
 	return "https://github.com/o/r/pull/42", nil
@@ -306,6 +318,109 @@ func TestSecurityReviewRunsOnlyWhenFlagged(t *testing.T) {
 		if ran != flagged {
 			t.Errorf("security_review=%v but security reviewer ran=%v", flagged, ran)
 		}
+	}
+}
+
+// A gated unit must never merge itself, which is the default for every unit.
+func TestGatedUnitStopsAtThePR(t *testing.T) {
+	root := t.TempDir()
+	agent := &fakeAgent{root: root, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	git := &fakeGit{clean: true, changes: true}
+
+	res, err := RunUnit(context.Background(), newDeps(t, agent, git, &fakeStore{}), testIssue(), testUnit())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Outcome != OutcomePR {
+		t.Errorf("outcome = %q, want pr", res.Outcome)
+	}
+	if len(git.merged) != 0 {
+		t.Error("a gated unit merged itself")
+	}
+}
+
+// With autonomy and a clean run, the unit merges and leaves an audit trail.
+func TestAutonomousUnitMergesAndRecordsWhy(t *testing.T) {
+	root := t.TempDir()
+	agent := &fakeAgent{root: root, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	git := &fakeGit{clean: true, changes: true}
+	store := &fakeStore{}
+
+	unit := testUnit()
+	unit.Autonomy = state.AutonomyMerge
+
+	res, err := RunUnit(context.Background(), newDeps(t, agent, git, store), testIssue(), unit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Outcome != OutcomeMerged {
+		t.Fatalf("outcome = %q, want merged: %s", res.Outcome, res.Autonomy.Reason)
+	}
+	if len(git.merged) != 1 {
+		t.Fatalf("merged %d times, want 1", len(git.merged))
+	}
+	if last := store.statuses[len(store.statuses)-1]; last != state.StatusDone {
+		t.Errorf("final status = %q, want agent:done", last)
+	}
+	if len(store.comments) != 1 || !strings.Contains(store.comments[0], "Merged automatically") {
+		t.Errorf("an unattended merge must leave an audit trail: %v", store.comments)
+	}
+}
+
+// A protected path gates the merge even when autonomy would allow it.
+func TestAutonomousUnitStopsOnProtectedPath(t *testing.T) {
+	root := t.TempDir()
+	agent := &fakeAgent{root: root, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	git := &fakeGit{clean: true, changes: true, changedFiles: []string{"db/migrations/003_add.sql"}}
+
+	unit := testUnit()
+	unit.Autonomy = state.AutonomyMerge
+
+	res, err := RunUnit(context.Background(), newDeps(t, agent, git, &fakeStore{}), testIssue(), unit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Outcome != OutcomePR {
+		t.Errorf("outcome = %q, want pr", res.Outcome)
+	}
+	if len(git.merged) != 0 {
+		t.Error("a migration was merged unattended")
+	}
+	if !strings.Contains(res.Autonomy.Reason, "protected path") {
+		t.Errorf("reason = %q", res.Autonomy.Reason)
+	}
+}
+
+// A unit that needed a retry must not merge itself, even at full autonomy.
+func TestRetriedUnitIsNotAutoMerged(t *testing.T) {
+	root := t.TempDir()
+	agent := &fakeAgent{root: root, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {{Verdict: VerdictBlocked, Summary: "oops"}, ok("fixed")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	git := &fakeGit{clean: true, changes: true}
+
+	unit := testUnit()
+	unit.Autonomy = state.AutonomyFull
+
+	res, err := RunUnit(context.Background(), newDeps(t, agent, git, &fakeStore{}), testIssue(), unit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(git.merged) != 0 {
+		t.Errorf("a unit that took %d attempts merged itself", res.Attempts)
+	}
+	if !strings.Contains(res.Autonomy.Reason, "attempts") {
+		t.Errorf("reason = %q", res.Autonomy.Reason)
 	}
 }
 
