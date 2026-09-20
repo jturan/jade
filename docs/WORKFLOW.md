@@ -163,9 +163,20 @@ loses its place on any compaction or restart. Making it thin is what buys you
 restartability and cross-machine resume.
 
 If you want the conversational feel back, install the Claude Code plugin and sit
-in a Claude Code session in the `orchestrator` tab. Then "what's next?" and
-"build the next unit" work as English, and the skills shell out to the same jade
-commands. You get the ergonomics without paying for a stateful orchestrator.
+in a Claude Code session in the `orchestrator` tab:
+
+```sh
+claude plugin marketplace add jturan/jade
+claude plugin install jade@jade
+```
+
+Then "what's next?" and "build the next unit" work as English, and the skills
+shell out to the same jade commands. You get the ergonomics without paying for a
+stateful orchestrator.
+
+The plugin is an adapter, not the product. Its skills hold no prompt content —
+every prompt lives in the binary, so there is one copy to maintain. Delete the
+plugin and nothing stops working.
 
 ## Letting units merge themselves
 

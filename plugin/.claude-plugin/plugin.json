@@ -1,0 +1,8 @@
+{
+  "name": "jade",
+  "description": "Thin adapter over the jade CLI. Gives Claude Code sessions slash-command access to jade's discovery, planning, and build loop without making Claude structural to the system.",
+  "author": {
+    "name": "Jason Turan"
+  },
+  "version": "0.1.0"
+}
