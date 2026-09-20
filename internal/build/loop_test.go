@@ -67,6 +67,7 @@ type fakeGit struct {
 	changes      bool
 	changedFiles []string
 	merged       []string
+	pushErr      error
 	committed    []string
 	pushed       []string
 	prCreated    bool
@@ -83,7 +84,13 @@ func (g *fakeGit) CommitAll(_ context.Context, m string) error {
 	g.committed = append(g.committed, m)
 	return nil
 }
-func (g *fakeGit) Push(_ context.Context, b string) error { g.pushed = append(g.pushed, b); return nil }
+func (g *fakeGit) Push(_ context.Context, b string) error {
+	if g.pushErr != nil {
+		return g.pushErr
+	}
+	g.pushed = append(g.pushed, b)
+	return nil
+}
 func (g *fakeGit) ChangedFiles(context.Context, string) ([]string, error) {
 	if g.changedFiles == nil {
 		return []string{"internal/thing.go"}, nil
@@ -449,6 +456,47 @@ func TestNotifyFailureDoesNotFailTheLoop(t *testing.T) {
 	// actually read.
 	if len(store.comments) != 1 {
 		t.Error("the issue comment is the durable record and must still be written")
+	}
+}
+
+// A failure that is not a unit outcome — a rejected push, a pane that would not
+// open — must still leave the issue legible. Otherwise the unit sits at
+// agent:in-progress with nothing running and no explanation.
+//
+// Found by the first live run: the push was rejected for a missing OAuth scope
+// and the unit was left stranded mid-flight.
+func TestHarnessFailureStrandsTheUnitLegibly(t *testing.T) {
+	root := t.TempDir()
+	agent := &fakeAgent{root: root, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	git := &fakeGit{
+		clean:   true,
+		changes: true,
+		pushErr: errors.New("refusing to allow an OAuth App to create or update workflow"),
+	}
+	store := &fakeStore{}
+
+	_, err := RunUnit(context.Background(), newDeps(t, agent, git, store), testIssue(), testUnit())
+	if err == nil {
+		t.Fatal("expected the push failure to surface")
+	}
+	if !strings.Contains(err.Error(), "OAuth") {
+		t.Errorf("the original cause must not be buried: %v", err)
+	}
+
+	if last := store.statuses[len(store.statuses)-1]; last != state.StatusBlocked {
+		t.Errorf("final status = %q, want agent:blocked — an interrupted unit must not look in-flight", last)
+	}
+	if len(store.comments) != 1 || !strings.Contains(store.comments[0], "OAuth") {
+		t.Errorf("the cause must be readable from the issue alone: %v", store.comments)
+	}
+	if !strings.Contains(store.comments[0], "unit/42") {
+		t.Error("the comment should say where the work in progress is")
+	}
+	if len(agent.notified) != 1 {
+		t.Errorf("expected a notification, got %v", agent.notified)
 	}
 }
 
