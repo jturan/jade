@@ -24,6 +24,11 @@ func newStatusCmd() *cobra.Command {
 			ctx := cmd.Context()
 			store := state.NewStore(repo)
 
+			// Reconcile first so the table never shows a merged unit as still
+			// awaiting review.
+			if err := reconcile(ctx, store, cmd.OutOrStdout()); err != nil {
+				return err
+			}
 			issues, err := store.ListUnits(ctx)
 			if err != nil {
 				return err

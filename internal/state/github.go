@@ -21,6 +21,9 @@ type Issue struct {
 	State  string  `json:"state"`
 	URL    string  `json:"url"`
 	Labels []Label `json:"labels"`
+	// StateReason is why a closed issue was closed: COMPLETED, NOT_PLANNED,
+	// or empty while it is open.
+	StateReason string `json:"stateReason"`
 }
 
 // Label is a GitHub label.
@@ -96,7 +99,7 @@ func (s *Store) ListUnits(ctx context.Context) ([]Issue, error) {
 		"--label", LabelUnitOfWork,
 		"--state", "all",
 		"--limit", "200",
-		"--json", "number,title,body,state,url,labels",
+		"--json", "number,title,body,state,stateReason,url,labels",
 	)
 	if err != nil {
 		return nil, err
@@ -171,6 +174,47 @@ func (s *Store) SetStatus(ctx context.Context, number int, status Status) error 
 		}
 	}
 	return s.gh(ctx, nil, args...)
+}
+
+// Reconciliation is one closed unit whose status label had fallen behind.
+type Reconciliation struct {
+	Issue Issue
+	From  Status
+	// Moved is true when the label was changed to agent:done. False means the
+	// issue was closed without completing and its label was left alone.
+	Moved bool
+}
+
+// Reconcile moves closed units still labeled agent:review or
+// agent:in-progress to agent:done, when GitHub reports them completed.
+//
+// The loop only labels a unit done when it merges the PR itself. A gated unit
+// is merged by a human, GitHub closes the issue through "Closes #N", and
+// nothing touches the label — so the status would otherwise stay stale
+// forever. Work closed as not planned is reported but never marked done:
+// abandoned is not finished. Idempotent: a second run finds nothing to move.
+func (s *Store) Reconcile(ctx context.Context) ([]Reconciliation, error) {
+	issues, err := s.ListUnits(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []Reconciliation
+	for _, issue := range issues {
+		from := issue.Status()
+		if !issue.Closed() || (from != StatusReview && from != StatusInProgress) {
+			continue
+		}
+		if !strings.EqualFold(issue.StateReason, "completed") {
+			out = append(out, Reconciliation{Issue: issue, From: from})
+			continue
+		}
+		if err := s.SetStatus(ctx, issue.Number, StatusDone); err != nil {
+			return out, fmt.Errorf("issue #%d: %w", issue.Number, err)
+		}
+		out = append(out, Reconciliation{Issue: issue, From: from, Moved: true})
+	}
+	return out, nil
 }
 
 // Comment posts a comment on an issue. The build loop uses this to leave a
