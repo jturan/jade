@@ -24,11 +24,6 @@ func newStatusCmd() *cobra.Command {
 			ctx := cmd.Context()
 			store := state.NewStore(repo)
 
-			// Reconcile first so the table never shows a merged unit as still
-			// awaiting review.
-			if err := reconcile(ctx, store, cmd.OutOrStdout()); err != nil {
-				return err
-			}
 			issues, err := store.ListUnits(ctx)
 			if err != nil {
 				return err
@@ -53,13 +48,22 @@ func newStatusCmd() *cobra.Command {
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "ISSUE\tSTATUS\tDEPENDS ON\tTITLE")
 
+			// status stays read-only: a closed unit whose label says it is
+			// still in flight is flagged here, and the build loop reconciles it.
+			stale := false
+
 			for _, issue := range issues {
 				status := string(issue.Status())
 				if status == "" {
 					status = "-"
 				}
 				if issue.Closed() {
-					status = "closed"
+					if label := issue.Status(); label == state.StatusReview || label == state.StatusInProgress {
+						status = "closed ! " + string(label)
+						stale = true
+					} else {
+						status = "closed"
+					}
 				} else if readyNow[issue.Number] {
 					status += " *"
 				}
@@ -80,6 +84,9 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(out, "\n%s\n", dimStyle.Render("* dispatchable now — dependencies satisfied"))
+			if stale {
+				fmt.Fprintf(out, "%s\n", dimStyle.Render("! closed but still labeled in flight — the next jade build pass moves merged ones to agent:done"))
+			}
 			return nil
 		},
 	}

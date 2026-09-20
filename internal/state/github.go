@@ -24,6 +24,15 @@ type Issue struct {
 	// StateReason is why a closed issue was closed: COMPLETED, NOT_PLANNED,
 	// or empty while it is open.
 	StateReason string `json:"stateReason"`
+	// ClosedBy lists the pull requests that reference this issue as one they
+	// close. A listed PR is not necessarily merged.
+	ClosedBy []PullRequestRef `json:"closedByPullRequestsReferences"`
+}
+
+// PullRequestRef is a pull request linked to an issue.
+type PullRequestRef struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"`
 }
 
 // Label is a GitHub label.
@@ -99,7 +108,7 @@ func (s *Store) ListUnits(ctx context.Context) ([]Issue, error) {
 		"--label", LabelUnitOfWork,
 		"--state", "all",
 		"--limit", "200",
-		"--json", "number,title,body,state,stateReason,url,labels",
+		"--json", "number,title,body,state,stateReason,closedByPullRequestsReferences,url,labels",
 	)
 	if err != nil {
 		return nil, err
@@ -181,18 +190,22 @@ type Reconciliation struct {
 	Issue Issue
 	From  Status
 	// Moved is true when the label was changed to agent:done. False means the
-	// issue was closed without completing and its label was left alone.
+	// issue was closed without a merged PR and its label was left alone.
 	Moved bool
+	// Reason says why an unmoved issue was left alone.
+	Reason string
 }
 
 // Reconcile moves closed units still labeled agent:review or
-// agent:in-progress to agent:done, when GitHub reports them completed.
+// agent:in-progress to agent:done, when a merged pull request closed them.
 //
 // The loop only labels a unit done when it merges the PR itself. A gated unit
 // is merged by a human, GitHub closes the issue through "Closes #N", and
 // nothing touches the label — so the status would otherwise stay stale
-// forever. Work closed as not planned is reported but never marked done:
-// abandoned is not finished. Idempotent: a second run finds nothing to move.
+// forever. GitHub records COMPLETED for a plain Close click too, so the reason
+// alone is not proof: a linked PR must also be merged. Anything else is
+// reported but never marked done: abandoned is not finished. Idempotent: a
+// second run finds nothing to move.
 func (s *Store) Reconcile(ctx context.Context) ([]Reconciliation, error) {
 	issues, err := s.ListUnits(ctx)
 	if err != nil {
@@ -206,7 +219,19 @@ func (s *Store) Reconcile(ctx context.Context) ([]Reconciliation, error) {
 			continue
 		}
 		if !strings.EqualFold(issue.StateReason, "completed") {
-			out = append(out, Reconciliation{Issue: issue, From: from})
+			reason := strings.ToLower(strings.ReplaceAll(issue.StateReason, "_", " "))
+			if reason == "" {
+				reason = "unknown reason"
+			}
+			out = append(out, Reconciliation{Issue: issue, From: from, Reason: "closed as " + reason})
+			continue
+		}
+		merged, err := s.mergedCloser(ctx, issue)
+		if err != nil {
+			return out, fmt.Errorf("issue #%d: %w", issue.Number, err)
+		}
+		if !merged {
+			out = append(out, Reconciliation{Issue: issue, From: from, Reason: "closed without a merged pull request"})
 			continue
 		}
 		if err := s.SetStatus(ctx, issue.Number, StatusDone); err != nil {
@@ -215,6 +240,27 @@ func (s *Store) Reconcile(ctx context.Context) ([]Reconciliation, error) {
 		out = append(out, Reconciliation{Issue: issue, From: from, Moved: true})
 	}
 	return out, nil
+}
+
+// mergedCloser reports whether any pull request linked to close the issue has
+// been merged.
+func (s *Store) mergedCloser(ctx context.Context, issue Issue) (bool, error) {
+	for _, pr := range issue.ClosedBy {
+		ref := pr.URL
+		if ref == "" {
+			ref = strconv.Itoa(pr.Number)
+		}
+		var view struct {
+			State string `json:"state"`
+		}
+		if err := s.gh(ctx, &view, "pr", "view", ref, "--json", "state"); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(view.State, "merged") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Comment posts a comment on an issue. The build loop uses this to leave a

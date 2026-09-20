@@ -335,16 +335,12 @@ func reconcile(ctx context.Context, store *state.Store, out io.Writer) error {
 	changes, err := store.Reconcile(ctx)
 	for _, c := range changes {
 		if c.Moved {
-			fmt.Fprintf(out, "%s #%d closed as completed: %s → %s\n",
+			fmt.Fprintf(out, "%s #%d merged: %s → %s\n",
 				okStyle.Render("·"), c.Issue.Number, c.From, state.StatusDone)
 			continue
 		}
-		reason := strings.ToLower(strings.ReplaceAll(c.Issue.StateReason, "_", " "))
-		if reason == "" {
-			reason = "unknown reason"
-		}
-		fmt.Fprintf(out, "%s #%d closed (%s), not completed; left at %s\n",
-			okStyle.Render("·"), c.Issue.Number, reason, c.From)
+		fmt.Fprintf(out, "%s #%d %s; left at %s\n",
+			okStyle.Render("·"), c.Issue.Number, c.Reason, c.From)
 	}
 	return err
 }
