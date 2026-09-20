@@ -202,6 +202,41 @@ func RunUnit(ctx context.Context, d Deps, issue state.Issue, unit state.Unit) (*
 	}
 	log("unit #%d on %s", issue.Number, branch)
 
+	// From here the issue is marked in-progress. Any failure that is not a
+	// unit outcome — a rejected push, a pane that would not open — must still
+	// leave the issue in a state someone can act on. Otherwise the unit sits
+	// at agent:in-progress with nothing running and no explanation, which is
+	// the worst state to come back to.
+	res, err := runUnitBody(ctx, d, issue, unit, branch, base, started, log)
+	if err != nil {
+		strand(ctx, d, issue, branch, err)
+		return nil, err
+	}
+	return res, nil
+}
+
+// strand records a harness failure on the issue so an interrupted unit stays
+// legible. Errors here are ignored: the caller already has a real failure to
+// report, and burying it under a bookkeeping error helps nobody.
+func strand(ctx context.Context, d Deps, issue state.Issue, branch string, cause error) {
+	body := fmt.Sprintf(
+		"**Interrupted.** jade could not finish this unit:\n\n```\n%s\n```\n\nWork in progress is on `%s`.",
+		cause, branch)
+	_ = d.Store.Comment(ctx, issue.Number, body)
+	_ = d.Store.SetStatus(ctx, issue.Number, state.StatusBlocked)
+	_ = d.Agent.Notify(ctx, fmt.Sprintf("jade: #%d interrupted", issue.Number), cause.Error())
+}
+
+func runUnitBody(
+	ctx context.Context,
+	d Deps,
+	issue state.Issue,
+	unit state.Unit,
+	branch, base string,
+	started time.Time,
+	log func(string, ...any),
+) (*Result, error) {
+
 	resolved := d.Config.ApplyUnit(unit.Overrides())
 	buildReport := ReportPath(d.Root, "builder")
 
