@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 )
@@ -191,4 +192,45 @@ func (r *Resolved) ApplyUnit(override map[Role]Agent) *Resolved {
 	clone.Agents = agents
 	clone.Origins = origins
 	return &clone
+}
+
+// RepoDiscoveryDir is where discovery notes go when a profile's sink is the
+// repo rather than an external notes directory.
+const RepoDiscoveryDir = "docs/discovery"
+
+// ResolveSink returns the directory discovery notes should be written to, and
+// creates it if needed.
+//
+// A work profile writes into the repo so nothing lands in a personal vault; a
+// personal profile writes to the vault so homeless ideas still have a home. The
+// note itself is identical either way.
+func (r *Resolved) ResolveSink(repoRoot string) (string, error) {
+	dir := r.Profile.DiscoverySink
+	if dir == SinkRepo {
+		if repoRoot == "" {
+			return "", fmt.Errorf("profile %q writes discovery notes into the repo, but this is not a repository", r.Profile.Name)
+		}
+		dir = filepath.Join(repoRoot, RepoDiscoveryDir)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating discovery sink %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// SinkConventions returns any agent instructions governing the sink, so a
+// discovery note written into someone's vault follows that vault's rules for
+// frontmatter, naming, and linking rather than inventing its own.
+func SinkConventions(dir string) string {
+	for _, candidate := range []string{
+		filepath.Join(dir, "CLAUDE.md"),
+		filepath.Join(dir, "AGENTS.md"),
+		filepath.Join(filepath.Dir(dir), "CLAUDE.md"),
+		filepath.Join(filepath.Dir(dir), "AGENTS.md"),
+	} {
+		if data, err := os.ReadFile(candidate); err == nil {
+			return fmt.Sprintf("From %s:\n\n%s", candidate, string(data))
+		}
+	}
+	return ""
 }
