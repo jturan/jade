@@ -13,6 +13,7 @@ import (
 	"github.com/jturan/jade/internal/prompts"
 	"github.com/jturan/jade/internal/runner"
 	"github.com/jturan/jade/internal/state"
+	"github.com/jturan/jade/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -93,6 +94,13 @@ func newBuildCmd() *cobra.Command {
 				return err
 			}
 
+			// A telemetry failure must never stop a build, so an unopenable
+			// log degrades to no recording rather than an error.
+			var recorder build.Recorder
+			if tlog, err := telemetry.Open(""); err == nil {
+				recorder = telemetryRecorder{log: tlog}
+			}
+
 			deps := build.Deps{
 				Agent: &herdrAgent{
 					r:           runner.New(),
@@ -111,6 +119,8 @@ func newBuildCmd() *cobra.Command {
 				AutonomyOverride: state.Autonomy(autonomy),
 				ProtectedPaths:   resolved.Profile.ProtectedPaths,
 				MaxAutoMerges:    maxAutoMerges,
+				Recorder:         recorder,
+				Repo:             repo,
 				Log: func(format string, args ...any) {
 					fmt.Fprintf(out, "%s %s\n", okStyle.Render("·"), fmt.Sprintf(format, args...))
 				},

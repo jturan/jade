@@ -8,7 +8,57 @@ import (
 
 	"github.com/jturan/jade/internal/config"
 	"github.com/jturan/jade/internal/state"
+	"github.com/jturan/jade/internal/telemetry"
 )
+
+// record writes a telemetry event if a Recorder is configured.
+func (d Deps) record(e telemetry.Event) {
+	if d.Recorder != nil {
+		d.Recorder.Record(e)
+	}
+}
+
+// dispatchAndRecord runs an agent, times it, and records the outcome.
+func dispatchAndRecord(ctx context.Context, d Deps, disp Dispatch, unit int, attempt int, reportPath string) (Report, error) {
+	started := time.Now()
+	err := d.Agent.Dispatch(ctx, disp)
+
+	event := telemetry.Event{
+		Repo:    d.Repo,
+		Unit:    unit,
+		Role:    string(disp.Role),
+		Vendor:  disp.Vendor,
+		Model:   disp.Model,
+		Effort:  disp.Effort,
+		Attempt: attempt,
+		Seconds: time.Since(started).Seconds(),
+	}
+
+	if err != nil {
+		event.Outcome = telemetry.OutcomeError
+		event.Detail = err.Error()
+		d.record(event)
+		return Report{}, err
+	}
+
+	report, readErr := ReadReport(reportPath)
+	if readErr != nil {
+		// A missing or unreadable report is a harness problem, not a verdict
+		// on the model, so it is recorded as an error rather than a failure.
+		event.Outcome = telemetry.OutcomeError
+		event.Detail = readErr.Error()
+		d.record(event)
+		return Report{}, readErr
+	}
+
+	event.Outcome = telemetry.OutcomeOK
+	if report.Verdict == VerdictBlocked {
+		event.Outcome = telemetry.OutcomeBlocked
+		event.Detail = report.Summary
+	}
+	d.record(event)
+	return report, nil
+}
 
 // Agent dispatches one agent and waits for it to settle. The loop does not care
 // whether that happens in a herdr pane or anywhere else.
@@ -41,6 +91,13 @@ type Git interface {
 	CreatePR(ctx context.Context, title, body, base string) (string, error)
 	ChangedFiles(ctx context.Context, base string) ([]string, error)
 	MergePR(ctx context.Context, url string) error
+}
+
+// Recorder records what each agent run cost and whether it worked. Telemetry
+// failures are ignored by the loop: losing a line is never worth failing a run
+// that otherwise succeeded.
+type Recorder interface {
+	Record(e telemetry.Event)
 }
 
 // Store is the subset of the state store the loop needs.
@@ -78,6 +135,10 @@ type Deps struct {
 	// AutoMergesSoFar and MaxAutoMerges cap unattended merges per run.
 	AutoMergesSoFar int
 	MaxAutoMerges   int
+	// Recorder is optional; a nil Recorder disables telemetry.
+	Recorder Recorder
+	// Repo names the repository in telemetry rows.
+	Repo string
 	// Log receives human-readable progress.
 	Log func(format string, args ...any)
 }
@@ -123,6 +184,8 @@ func RunUnit(ctx context.Context, d Deps, issue state.Issue, unit state.Unit) (*
 	if !clean {
 		return nil, fmt.Errorf("working tree has uncommitted changes — commit or stash them before building")
 	}
+
+	started := time.Now()
 
 	base, err := d.Git.DefaultBranch(ctx)
 	if err != nil {
@@ -231,6 +294,7 @@ func RunUnit(ctx context.Context, d Deps, issue state.Issue, unit state.Unit) (*
 		if !decision.Merge {
 			log("not merging: %s", decision.Reason)
 			result.Outcome = OutcomePR
+			d.recordUnit(issue, unit, result, started)
 			return result, nil
 		}
 
@@ -248,10 +312,15 @@ func RunUnit(ctx context.Context, d Deps, issue state.Issue, unit state.Unit) (*
 		}
 		log("merged automatically: %s", decision.Reason)
 		result.Outcome = OutcomeMerged
+		d.recordUnit(issue, unit, result, started)
 		return result, nil
 	}
 
-	return escalate(ctx, d, issue, branch, attempts, previous)
+	res, err := escalate(ctx, d, issue, branch, attempts, previous)
+	if err == nil {
+		d.recordUnit(issue, unit, res, started)
+	}
+	return res, err
 }
 
 // escalate records a unit that ran out of retries and tells a human.
@@ -310,7 +379,7 @@ func runBuilder(
 	}
 
 	agent := resolved.Agents[config.RoleBuilder]
-	err = d.Agent.Dispatch(ctx, Dispatch{
+	return dispatchAndRecord(ctx, d, Dispatch{
 		Name:    fmt.Sprintf("jade-builder-%d-%d", issue.Number, attempt),
 		Role:    config.RoleBuilder,
 		Vendor:  agent.Vendor,
@@ -318,11 +387,7 @@ func runBuilder(
 		Effort:  agent.Effort,
 		Prompt:  prompt,
 		Timeout: d.BuildTimeout,
-	})
-	if err != nil {
-		return Report{}, err
-	}
-	return ReadReport(reportPath)
+	}, issue.Number, attempt, reportPath)
 }
 
 // reviewResult pairs a role with what its reviewer said.
@@ -357,7 +422,7 @@ func runReviews(
 		}
 
 		agent := resolved.Agents[role]
-		err = d.Agent.Dispatch(ctx, Dispatch{
+		report, err := dispatchAndRecord(ctx, d, Dispatch{
 			Name:    fmt.Sprintf("jade-%s-%d", shortRole(role), issue.Number),
 			Role:    role,
 			Vendor:  agent.Vendor,
@@ -365,12 +430,7 @@ func runReviews(
 			Effort:  agent.Effort,
 			Prompt:  prompt,
 			Timeout: d.ReviewTimeout,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		report, err := ReadReport(path)
+		}, issue.Number, 1, path)
 		if err != nil {
 			return nil, err
 		}
@@ -452,4 +512,26 @@ func shortRole(role config.Role) string {
 	default:
 		return string(role)
 	}
+}
+
+// recordUnit writes the row describing a whole unit's outcome, alongside the
+// individual agent runs that produced it.
+func (d Deps) recordUnit(issue state.Issue, unit state.Unit, res *Result, started time.Time) {
+	d.record(telemetry.Event{
+		Repo:     d.Repo,
+		Unit:     issue.Number,
+		Role:     telemetry.RoleUnit,
+		Seconds:  time.Since(started).Seconds(),
+		Outcome:  unitOutcome(res.Outcome),
+		Detail:   res.Autonomy.Reason,
+		Retries:  res.Attempts - 1,
+		Autonomy: string(unit.Autonomy),
+	})
+}
+
+func unitOutcome(o Outcome) telemetry.Outcome {
+	if o == OutcomeBlocked {
+		return telemetry.OutcomeBlocked
+	}
+	return telemetry.OutcomeOK
 }
