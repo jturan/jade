@@ -78,6 +78,13 @@ them to `docs/discovery/` in the repo instead.
 
 Run `jade doctor` to check all of this on a new machine.
 
+On [Omarchy](https://omarchy.org), install Go the conventional way rather than by
+hand — language runtimes there are mise-managed, not pacman packages:
+
+```sh
+omarchy install dev-env go
+```
+
 ## Install
 
 ```sh
