@@ -110,7 +110,7 @@ func Apply(ctx context.Context, c Creator, p *Plan) (*Result, error) {
 	tracking, err := c.CreateIssue(ctx, state.NewIssue{
 		Title:  "Tracking: " + p.Initiative,
 		Body:   trackingBody(p, res),
-		Labels: []string{"tracking"},
+		Labels: []string{state.LabelTracking},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating tracking issue: %w", err)
