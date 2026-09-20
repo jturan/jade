@@ -53,6 +53,62 @@ func TestParseUnitAppliesDefaults(t *testing.T) {
 	}
 }
 
+// An issue body that documents the schema contains an example jade block. The
+// example must never shadow the unit's real configuration — doing so silently
+// gives the unit someone else's settings and, with no depends_on, lets it run
+// out of sequence.
+func TestParseUnitUsesLastBlockNotFirst(t *testing.T) {
+	body := "## Plan\n\nSet it like this:\n\n" +
+		"```yaml jade\nunit: 3\nautonomy: merge\n```\n\n" +
+		"## Config\n\n" +
+		"```yaml jade\nunit: 15\ndepends_on: [7]\nsecurity_review: true\n```\n"
+
+	u, err := ParseUnit(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u.Number != 15 {
+		t.Errorf("unit = %d, want 15 — an example block shadowed the real one", u.Number)
+	}
+	if len(u.DependsOn) != 1 || u.DependsOn[0] != 7 {
+		t.Errorf("depends_on = %v, want [7] — losing this lets the unit run out of sequence", u.DependsOn)
+	}
+	if u.Autonomy != AutonomyGated {
+		t.Errorf("autonomy = %q, want gated — it must not inherit the example's", u.Autonomy)
+	}
+	if !u.SecurityReview {
+		t.Error("security_review was lost")
+	}
+}
+
+// RenderUnit must rewrite the same block ParseUnit reads, or a write would
+// clobber an example and leave the real config untouched.
+func TestRenderUnitRewritesTheLastBlock(t *testing.T) {
+	body := "```yaml jade\nunit: 3\nautonomy: merge\n```\n\ntext\n\n" +
+		"```yaml jade\nunit: 15\ndepends_on: [7]\n```\n"
+
+	u, err := ParseUnit(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	u.RetryLimit = 5
+
+	got, err := RenderUnit(body, u)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(got, "unit: 3") || !strings.Contains(got, "autonomy: merge") {
+		t.Error("the example block was clobbered")
+	}
+	round, err := ParseUnit(got)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if round.Number != 15 || round.RetryLimit != 5 {
+		t.Errorf("the operative block was not updated: %+v", round)
+	}
+}
+
 func TestParseUnitNoBlock(t *testing.T) {
 	_, err := ParseUnit("Just prose, no configuration.")
 	var noBlock ErrNoBlock

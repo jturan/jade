@@ -68,8 +68,23 @@ type Unit struct {
 	RetryLimit     int  `yaml:"retry_limit"`
 }
 
-// blockRE matches the fenced ```yaml jade block carrying a unit's settings.
+// blockRE matches a fenced ```yaml jade block.
+//
+// An issue body may contain more than one: prose that documents the schema is
+// itself written in a jade block, and an example must never be mistaken for the
+// unit's real configuration. The **last** block wins, matching where RenderUnit
+// writes, so the operative block is always the one at the end.
 var blockRE = regexp.MustCompile("(?ms)^```yaml jade[ \t]*\r?\n(.*?)^```[ \t]*$")
+
+// lastBlock returns the final jade block in a body: its submatch and its bounds.
+func lastBlock(body string) (content string, loc []int) {
+	matches := blockRE.FindAllStringSubmatchIndex(body, -1)
+	if len(matches) == 0 {
+		return "", nil
+	}
+	m := matches[len(matches)-1]
+	return body[m[2]:m[3]], []int{m[0], m[1]}
+}
 
 // ErrNoBlock reports an issue body with no jade configuration block. Callers
 // fall back to role defaults rather than treating this as a failure.
@@ -79,13 +94,13 @@ func (ErrNoBlock) Error() string { return "issue body has no ```yaml jade block"
 
 // ParseUnit extracts a unit's settings from an issue body.
 func ParseUnit(body string) (Unit, error) {
-	m := blockRE.FindStringSubmatch(body)
-	if m == nil {
+	content, loc := lastBlock(body)
+	if loc == nil {
 		return Unit{}, ErrNoBlock{}
 	}
 
 	var u Unit
-	if err := yaml.Unmarshal([]byte(m[1]), &u); err != nil {
+	if err := yaml.Unmarshal([]byte(content), &u); err != nil {
 		return Unit{}, fmt.Errorf("parsing jade block: %w", err)
 	}
 	if u.RetryLimit == 0 {
@@ -107,7 +122,7 @@ func RenderUnit(body string, u Unit) (string, error) {
 	}
 	block := "```yaml jade\n" + string(out) + "```"
 
-	if loc := blockRE.FindStringIndex(body); loc != nil {
+	if _, loc := lastBlock(body); loc != nil {
 		return body[:loc[0]] + block + body[loc[1]:], nil
 	}
 	if body != "" && !strings.HasSuffix(body, "\n") {
