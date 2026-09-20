@@ -5,10 +5,12 @@
 package prompts
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
+	"text/template"
 
 	"github.com/jturan/jade/internal/config"
 )
@@ -32,4 +34,19 @@ func Load(name string) (string, error) {
 		return "", fmt.Errorf("no prompt template named %q", name)
 	}
 	return string(data), nil
+}
+
+// Render fills a prompt template. Templates use text/template, so a missing key
+// is an error rather than a silently empty prompt — an agent given a blank
+// context path will improvise, which is worse than failing.
+func Render(tmpl string, data map[string]string) (string, error) {
+	t, err := template.New("prompt").Option("missingkey=error").Parse(tmpl)
+	if err != nil {
+		return "", fmt.Errorf("parsing prompt template: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("rendering prompt: %w", err)
+	}
+	return buf.String(), nil
 }
