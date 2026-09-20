@@ -13,3 +13,6 @@ config.yml
 .DS_Store
 .idea/
 *.swp
+
+# Agent reports
+.jade/

@@ -1,0 +1,398 @@
+package build
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jturan/jade/internal/config"
+	"github.com/jturan/jade/internal/state"
+)
+
+// Agent dispatches one agent and waits for it to settle. The loop does not care
+// whether that happens in a herdr pane or anywhere else.
+type Agent interface {
+	Dispatch(ctx context.Context, d Dispatch) error
+	Notify(ctx context.Context, title, body string) error
+}
+
+// Dispatch describes one agent run.
+type Dispatch struct {
+	// Name is the herdr agent name, unique among live agents.
+	Name string
+	Role config.Role
+	// Vendor, Model and Effort come from the resolved config for this unit.
+	Vendor  string
+	Model   string
+	Effort  string
+	Prompt  string
+	Timeout time.Duration
+}
+
+// Git is the subset of git operations the loop needs.
+type Git interface {
+	IsClean(ctx context.Context) (bool, error)
+	HasChanges(ctx context.Context) (bool, error)
+	DefaultBranch(ctx context.Context) (string, error)
+	Checkout(ctx context.Context, branch string) error
+	CommitAll(ctx context.Context, message string) error
+	Push(ctx context.Context, branch string) error
+	CreatePR(ctx context.Context, title, body, base string) (string, error)
+}
+
+// Store is the subset of the state store the loop needs.
+type Store interface {
+	SetStatus(ctx context.Context, number int, status state.Status) error
+	Comment(ctx context.Context, number int, body string) error
+}
+
+// Prompts renders the prompt for a role.
+type Prompts interface {
+	Build(unit state.Unit, issue state.Issue, reportPath string, previous *Report) (string, error)
+	Review(role config.Role, issue state.Issue, reportPath, base string) (string, error)
+}
+
+// Deps is everything the loop needs from the outside world. Every dependency is
+// an interface so the state machine — the part with the subtle behaviour — can
+// be tested without herdr, git, or GitHub.
+type Deps struct {
+	Agent   Agent
+	Git     Git
+	Store   Store
+	Prompts Prompts
+	Config  *config.Resolved
+	// Root is the repository working directory.
+	Root string
+	// BuildTimeout and ReviewTimeout bound a single agent run.
+	BuildTimeout  time.Duration
+	ReviewTimeout time.Duration
+	// Log receives human-readable progress.
+	Log func(format string, args ...any)
+}
+
+// Outcome is how a unit ended.
+type Outcome string
+
+const (
+	// OutcomePR means a pull request is open and waiting for a human.
+	OutcomePR Outcome = "pr"
+	// OutcomeBlocked means the unit exhausted its retries and needs a human.
+	OutcomeBlocked Outcome = "blocked"
+)
+
+// Result describes a finished unit.
+type Result struct {
+	Outcome  Outcome
+	PRURL    string
+	Branch   string
+	Attempts int
+	Reason   string
+}
+
+// RunUnit takes one unit from ready to either an open pull request or an
+// escalation, without human input in between.
+func RunUnit(ctx context.Context, d Deps, issue state.Issue, unit state.Unit) (*Result, error) {
+	log := d.Log
+	if log == nil {
+		log = func(string, ...any) {}
+	}
+
+	// A dirty tree would be swept into this unit's commit. Refuse rather than
+	// silently attribute unrelated work to the unit.
+	clean, err := d.Git.IsClean(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !clean {
+		return nil, fmt.Errorf("working tree has uncommitted changes — commit or stash them before building")
+	}
+
+	base, err := d.Git.DefaultBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	branch := branchFor(issue)
+	if err := d.Git.Checkout(ctx, branch); err != nil {
+		return nil, err
+	}
+	if err := d.Store.SetStatus(ctx, issue.Number, state.StatusInProgress); err != nil {
+		return nil, err
+	}
+	log("unit #%d on %s", issue.Number, branch)
+
+	resolved := d.Config.ApplyUnit(unit.Overrides())
+	buildReport := ReportPath(d.Root, "builder")
+
+	// attempts is the initial run plus the unit's retry budget.
+	attempts := unit.RetryLimit + 1
+	var previous *Report
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			log("retry %d of %d", attempt-1, unit.RetryLimit)
+		}
+
+		report, err := runBuilder(ctx, d, resolved, issue, unit, buildReport, previous, attempt)
+		if err != nil {
+			return nil, err
+		}
+		if report.Verdict == VerdictBlocked {
+			previous = &report
+			continue
+		}
+
+		// A builder that claims success without running tests has not
+		// demonstrated anything, so treat it as a failed attempt.
+		if !report.TestsRun {
+			previous = &Report{
+				Verdict:  VerdictBlocked,
+				Summary:  "You reported success without running the tests. Run them and report again.",
+				Findings: []string{"tests_run was false in your report"},
+			}
+			continue
+		}
+
+		changed, err := d.Git.HasChanges(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !changed {
+			previous = &Report{
+				Verdict: VerdictBlocked,
+				Summary: "You reported success but the working tree is unchanged. Make the change, then report.",
+			}
+			continue
+		}
+
+		if err := d.Git.CommitAll(ctx, commitMessage(issue, report)); err != nil {
+			return nil, err
+		}
+
+		reviews, err := runReviews(ctx, d, resolved, issue, unit, base)
+		if err != nil {
+			return nil, err
+		}
+		if blocking := blockingReviews(reviews); len(blocking) > 0 {
+			log("review found %d blocking issue(s)", len(blocking))
+			previous = mergeReviewFindings(blocking)
+			continue
+		}
+
+		if err := d.Git.Push(ctx, branch); err != nil {
+			return nil, err
+		}
+		url, err := d.Git.CreatePR(ctx, issue.Title, prBody(issue, report, reviews), base)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Store.SetStatus(ctx, issue.Number, state.StatusReview); err != nil {
+			return nil, err
+		}
+		log("pull request open: %s", url)
+
+		return &Result{Outcome: OutcomePR, PRURL: url, Branch: branch, Attempts: attempt}, nil
+	}
+
+	return escalate(ctx, d, issue, branch, attempts, previous)
+}
+
+// escalate records a unit that ran out of retries and tells a human.
+func escalate(ctx context.Context, d Deps, issue state.Issue, branch string, attempts int, last *Report) (*Result, error) {
+	reason := "the builder did not report success"
+	if last != nil && last.Summary != "" {
+		reason = last.Summary
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Blocked after %d attempts.**\n\n%s\n", attempts, reason)
+	if last != nil && len(last.Findings) > 0 {
+		b.WriteString("\nOutstanding:\n\n")
+		for _, f := range last.Findings {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
+	fmt.Fprintf(&b, "\nWork in progress is on `%s`.\n", branch)
+
+	if err := d.Store.Comment(ctx, issue.Number, b.String()); err != nil {
+		return nil, err
+	}
+	if err := d.Store.SetStatus(ctx, issue.Number, state.StatusBlocked); err != nil {
+		return nil, err
+	}
+	// A failed notification must never fail the loop: losing a toast is
+	// annoying, losing the run is worse.
+	_ = d.Agent.Notify(ctx, fmt.Sprintf("jade: #%d blocked", issue.Number), reason)
+
+	return &Result{
+		Outcome:  OutcomeBlocked,
+		Branch:   branch,
+		Attempts: attempts,
+		Reason:   reason,
+	}, nil
+}
+
+func runBuilder(
+	ctx context.Context,
+	d Deps,
+	resolved *config.Resolved,
+	issue state.Issue,
+	unit state.Unit,
+	reportPath string,
+	previous *Report,
+	attempt int,
+) (Report, error) {
+	prompt, err := d.Prompts.Build(unit, issue, reportPath, previous)
+	if err != nil {
+		return Report{}, err
+	}
+	// Remove any earlier report so a stale verdict cannot be read as this
+	// attempt's result.
+	if err := ClearReport(reportPath); err != nil {
+		return Report{}, err
+	}
+
+	agent := resolved.Agents[config.RoleBuilder]
+	err = d.Agent.Dispatch(ctx, Dispatch{
+		Name:    fmt.Sprintf("jade-builder-%d-%d", issue.Number, attempt),
+		Role:    config.RoleBuilder,
+		Vendor:  agent.Vendor,
+		Model:   agent.Model,
+		Effort:  agent.Effort,
+		Prompt:  prompt,
+		Timeout: d.BuildTimeout,
+	})
+	if err != nil {
+		return Report{}, err
+	}
+	return ReadReport(reportPath)
+}
+
+// reviewResult pairs a role with what its reviewer said.
+type reviewResult struct {
+	Role   config.Role
+	Report Report
+}
+
+// runReviews runs code review, and security review when the unit calls for it.
+func runReviews(
+	ctx context.Context,
+	d Deps,
+	resolved *config.Resolved,
+	issue state.Issue,
+	unit state.Unit,
+	base string,
+) ([]reviewResult, error) {
+	roles := []config.Role{config.RoleCodeReview}
+	if unit.SecurityReview {
+		roles = append(roles, config.RoleSecReview)
+	}
+
+	var out []reviewResult
+	for _, role := range roles {
+		path := ReportPath(d.Root, string(role))
+		prompt, err := d.Prompts.Review(role, issue, path, base)
+		if err != nil {
+			return nil, err
+		}
+		if err := ClearReport(path); err != nil {
+			return nil, err
+		}
+
+		agent := resolved.Agents[role]
+		err = d.Agent.Dispatch(ctx, Dispatch{
+			Name:    fmt.Sprintf("jade-%s-%d", shortRole(role), issue.Number),
+			Role:    role,
+			Vendor:  agent.Vendor,
+			Model:   agent.Model,
+			Effort:  agent.Effort,
+			Prompt:  prompt,
+			Timeout: d.ReviewTimeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		report, err := ReadReport(path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, reviewResult{Role: role, Report: report})
+	}
+	return out, nil
+}
+
+func blockingReviews(reviews []reviewResult) []reviewResult {
+	var out []reviewResult
+	for _, r := range reviews {
+		if r.Report.Verdict == VerdictBlocked {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// mergeReviewFindings folds blocking reviews into one report for the builder's
+// next attempt, so it sees every objection at once rather than one per cycle.
+func mergeReviewFindings(blocking []reviewResult) *Report {
+	merged := &Report{Verdict: VerdictBlocked}
+	var summaries []string
+	for _, r := range blocking {
+		if r.Report.Summary != "" {
+			summaries = append(summaries, fmt.Sprintf("%s: %s", r.Role, r.Report.Summary))
+		}
+		for _, f := range r.Report.Findings {
+			merged.Findings = append(merged.Findings, fmt.Sprintf("[%s] %s", r.Role, f))
+		}
+	}
+	merged.Summary = strings.Join(summaries, "\n")
+	return merged
+}
+
+func branchFor(issue state.Issue) string {
+	return branchName(issue.Number, issue.Title)
+}
+
+func commitMessage(issue state.Issue, report Report) string {
+	var b strings.Builder
+	b.WriteString(issue.Title)
+	if report.Summary != "" {
+		b.WriteString("\n\n")
+		b.WriteString(report.Summary)
+	}
+	fmt.Fprintf(&b, "\n\nCloses #%d\n", issue.Number)
+	return b.String()
+}
+
+func prBody(issue state.Issue, build Report, reviews []reviewResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Implements #%d.\n\n", issue.Number)
+	if build.Summary != "" {
+		b.WriteString(build.Summary)
+		b.WriteString("\n\n")
+	}
+	if len(reviews) > 0 {
+		b.WriteString("## Review\n\n")
+		for _, r := range reviews {
+			summary := r.Report.Summary
+			if summary == "" {
+				summary = "no findings"
+			}
+			fmt.Fprintf(&b, "- **%s**: %s\n", r.Role, summary)
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "Closes #%d\n", issue.Number)
+	return b.String()
+}
+
+func shortRole(role config.Role) string {
+	switch role {
+	case config.RoleSecReview:
+		return "sec"
+	case config.RoleCodeReview:
+		return "review"
+	default:
+		return string(role)
+	}
+}
