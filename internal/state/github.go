@@ -190,3 +190,97 @@ func (s *Store) UpdateUnit(ctx context.Context, issue Issue, u Unit) error {
 	}
 	return s.gh(ctx, nil, "issue", "edit", strconv.Itoa(issue.Number), "--body", body)
 }
+
+// NewIssue describes an issue to create.
+type NewIssue struct {
+	Title     string
+	Body      string
+	Labels    []string
+	Milestone string
+}
+
+// CreateIssue files an issue and returns it.
+//
+// gh prints the new issue's URL rather than JSON, so the number is read back
+// from that URL — there is no --json on issue create.
+func (s *Store) CreateIssue(ctx context.Context, in NewIssue) (Issue, error) {
+	args := []string{"issue", "create", "--title", in.Title, "--body", in.Body}
+	for _, l := range in.Labels {
+		args = append(args, "--label", l)
+	}
+	if in.Milestone != "" {
+		args = append(args, "--milestone", in.Milestone)
+	}
+	if s.Repo != "" {
+		args = append(args, "--repo", s.Repo)
+	}
+
+	stdout, stderr, err := s.run(ctx, args...)
+	if err != nil {
+		msg := strings.TrimSpace(string(stderr))
+		if msg == "" {
+			msg = strings.TrimSpace(string(stdout))
+		}
+		return Issue{}, fmt.Errorf("gh issue create: %s", msg)
+	}
+
+	url := strings.TrimSpace(string(stdout))
+	number, err := issueNumberFromURL(url)
+	if err != nil {
+		return Issue{}, err
+	}
+	return Issue{Number: number, Title: in.Title, Body: in.Body, State: "OPEN", URL: url}, nil
+}
+
+// issueNumberFromURL extracts the trailing number from an issue URL.
+func issueNumberFromURL(url string) (int, error) {
+	idx := strings.LastIndex(url, "/")
+	if idx < 0 || idx == len(url)-1 {
+		return 0, fmt.Errorf("could not read an issue number from %q", url)
+	}
+	number, err := strconv.Atoi(url[idx+1:])
+	if err != nil {
+		return 0, fmt.Errorf("could not read an issue number from %q", url)
+	}
+	return number, nil
+}
+
+// UpdateBody replaces an issue's body.
+func (s *Store) UpdateBody(ctx context.Context, number int, body string) error {
+	return s.gh(ctx, nil, "issue", "edit", strconv.Itoa(number), "--body", body)
+}
+
+// labelSpec is a label jade manages, with a fixed color and description so
+// every repo it touches looks the same.
+type labelSpec struct {
+	name, color, description string
+}
+
+func managedLabels() []labelSpec {
+	return []labelSpec{
+		{string(StatusReady), "0E8A16", "Unit is specced and ready to dispatch"},
+		{string(StatusInProgress), "FBCA04", "Builder is working this unit"},
+		{string(StatusReview), "1D76DB", "Awaiting code and/or security review"},
+		{string(StatusBlocked), "B60205", "Retry limit hit; needs human attention"},
+		{string(StatusDone), "5319E7", "Merged and closed"},
+		{LabelUnitOfWork, "C5DEF5", "One independently reviewable PR"},
+		{"tracking", "BFD4F2", "Sequence and status for an initiative"},
+	}
+}
+
+// EnsureLabels creates or updates jade's label taxonomy. Idempotent, so a new
+// repo is bootstrapped on first use rather than as a remembered chore.
+func (s *Store) EnsureLabels(ctx context.Context) error {
+	for _, l := range managedLabels() {
+		err := s.gh(ctx, nil,
+			"label", "create", l.name,
+			"--color", l.color,
+			"--description", l.description,
+			"--force",
+		)
+		if err != nil {
+			return fmt.Errorf("label %q: %w", l.name, err)
+		}
+	}
+	return nil
+}
