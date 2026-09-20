@@ -267,7 +267,7 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 	defer func() { _ = h.r.ClosePane(context.WithoutCancel(ctx), pane.PaneID) }()
 
 	if err := h.r.StartAgent(ctx, runner.StartOpts{
-		Name: d.Name, Kind: d.Vendor, PaneID: pane.PaneID,
+		Name: d.Name, Kind: d.Vendor, PaneID: pane.PaneID, Args: d.Args,
 	}); err != nil {
 		return fmt.Errorf("starting %s: %w", d.Role, err)
 	}

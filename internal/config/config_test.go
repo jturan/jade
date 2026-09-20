@@ -260,3 +260,38 @@ func TestSinkConventionsChecksParent(t *testing.T) {
 		t.Errorf("parent instructions not found: %q", got)
 	}
 }
+
+// Agent args describe a machine's trust posture, so they come from the profile
+// and cannot be widened by a unit of work.
+func TestArgsForReadsProfile(t *testing.T) {
+	r := &Resolved{Profile: Profile{
+		Name: "personal",
+		AgentArgs: map[Role][]string{
+			RoleBuilder: {"--dangerously-skip-permissions"},
+		},
+	}}
+
+	if got := r.ArgsFor(RoleBuilder); len(got) != 1 || got[0] != "--dangerously-skip-permissions" {
+		t.Errorf("builder args = %v", got)
+	}
+	// A role with nothing configured gets nothing — never an inherited default.
+	if got := r.ArgsFor(RoleCodeReview); len(got) != 0 {
+		t.Errorf("code_review args = %v, want none", got)
+	}
+}
+
+// Applying a unit's overrides must not disturb the machine's agent args, since
+// a unit widening its own permissions is exactly what this modelling prevents.
+func TestApplyUnitCannotChangeAgentArgs(t *testing.T) {
+	agents, origins := MergeAgents(DefaultAgents(), nil, LayerProfile)
+	r := &Resolved{
+		Profile: Profile{AgentArgs: map[Role][]string{RoleBuilder: {"--safe"}}},
+		Agents:  agents,
+		Origins: origins,
+	}
+
+	got := r.ApplyUnit(map[Role]Agent{RoleBuilder: {Model: "opus"}})
+	if len(got.ArgsFor(RoleBuilder)) != 1 || got.ArgsFor(RoleBuilder)[0] != "--safe" {
+		t.Errorf("unit override changed agent args: %v", got.ArgsFor(RoleBuilder))
+	}
+}
