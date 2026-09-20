@@ -3,11 +3,13 @@
 package build
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Verdict is how an agent says it went.
@@ -81,6 +83,61 @@ func ClearReport(path string) error {
 		return err
 	}
 	return nil
+}
+
+// Polling cadence for AwaitReport. Variables so tests can shorten them.
+var (
+	awaitPoll = time.Second
+	// awaitQuiet is how long an agent must stay settled without a report
+	// before AwaitReport accepts that none is coming.
+	awaitQuiet = 20 * time.Second
+)
+
+// AwaitReport blocks until the agent's report at path exists and parses, the
+// agent has stayed settled for a while without writing one, or the deadline
+// passes. A zero deadline means no deadline.
+//
+// A runner's own "settled" signal is not proof the work is done: herdr's
+// `agent prompt --wait` returns on the first idle state it observes, which can
+// come mid-task. The report is the agent's own statement that it finished, so
+// that is the signal that counts. settled is still consulted so an agent that
+// stopped without reporting does not hold the loop until the deadline; a nil
+// settled waits for the report or the deadline alone.
+func AwaitReport(ctx context.Context, path string, deadline time.Time, settled func(context.Context) (bool, error)) error {
+	var settledSince time.Time
+	for {
+		if _, err := ReadReport(path); err == nil {
+			return nil
+		}
+
+		now := time.Now()
+		if !deadline.IsZero() && now.After(deadline) {
+			return fmt.Errorf("agent did not write a report at %s before its timeout", path)
+		}
+
+		if settled != nil {
+			done, err := settled(ctx)
+			if err != nil {
+				return err
+			}
+			switch {
+			case !done:
+				settledSince = time.Time{}
+			case settledSince.IsZero():
+				settledSince = now
+			case now.Sub(settledSince) >= awaitQuiet:
+				// Let the caller read the (absent or unreadable) report and
+				// fail with the usual message.
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(awaitPoll):
+		}
+	}
 }
 
 // Blocking returns the findings that must be addressed, formatted for a prompt.

@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jturan/jade/internal/config"
 	"github.com/jturan/jade/internal/state"
+	"github.com/jturan/jade/internal/telemetry"
 )
 
 // fakeAgent writes a scripted report each time it is dispatched, standing in
@@ -22,6 +24,10 @@ type fakeAgent struct {
 	calls     []Dispatch
 	notified  []string
 	notifyErr error
+	// reportDelay, when set, simulates a runner whose completion signal fires
+	// before the agent is done: Dispatch's "prompt" returns at once, the report
+	// lands reportDelay later, and Dispatch holds on AwaitReport as herdr does.
+	reportDelay time.Duration
 }
 
 func (f *fakeAgent) Dispatch(_ context.Context, d Dispatch) error {
@@ -46,8 +52,26 @@ func (f *fakeAgent) Dispatch(_ context.Context, d Dispatch) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	if f.reportDelay == 0 {
+		return os.WriteFile(path, data, 0o644)
+	}
+
+	written := make(chan error, 1)
+	go func() {
+		time.Sleep(f.reportDelay)
+		written <- os.WriteFile(path, data, 0o644)
+	}()
+	stillWorking := func(context.Context) (bool, error) { return false, nil }
+	if err := AwaitReport(context.Background(), path, time.Time{}, stillWorking); err != nil {
+		return err
+	}
+	return <-written
 }
+
+// fakeRecorder keeps telemetry events in memory.
+type fakeRecorder struct{ events []telemetry.Event }
+
+func (r *fakeRecorder) Record(e telemetry.Event) { r.events = append(r.events, e) }
 
 func (f *fakeAgent) Notify(_ context.Context, title, _ string) error {
 	f.notified = append(f.notified, title)
@@ -547,5 +571,44 @@ func TestStaleReportIsCleared(t *testing.T) {
 	_, err := RunUnit(context.Background(), newDeps(t, agent, &fakeGit{clean: true, changes: true}, &fakeStore{}), testIssue(), testUnit())
 	if err == nil || !strings.Contains(err.Error(), "no report") {
 		t.Fatalf("a stale report was read as this attempt's result: %v", err)
+	}
+}
+
+// herdr's prompt --wait can return while the agent is still working. The
+// recorded duration must cover the work, not the early return, and the report
+// must not be read before it exists.
+func TestDurationCoversWorkAfterPromptReturns(t *testing.T) {
+	defer func(p time.Duration) { awaitPoll = p }(awaitPoll)
+	awaitPoll = 10 * time.Millisecond
+
+	root := t.TempDir()
+	delay := 300 * time.Millisecond
+	agent := &fakeAgent{root: root, reportDelay: delay, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	rec := &fakeRecorder{}
+	d := newDeps(t, agent, &fakeGit{clean: true, changes: true}, &fakeStore{})
+	d.Recorder = rec
+
+	if _, err := RunUnit(context.Background(), d, testIssue(), testUnit()); err != nil {
+		t.Fatal(err)
+	}
+
+	var agents int
+	for _, e := range rec.events {
+		if e.Role == "unit" {
+			continue
+		}
+		agents++
+		if e.Outcome != telemetry.OutcomeOK {
+			t.Errorf("%s outcome = %s (%s)", e.Role, e.Outcome, e.Detail)
+		}
+		if e.Seconds < delay.Seconds() {
+			t.Errorf("%s recorded %.3fs, but the agent worked for %.3fs", e.Role, e.Seconds, delay.Seconds())
+		}
+	}
+	if agents != 2 {
+		t.Fatalf("recorded %d agent events, want 2: %+v", agents, rec.events)
 	}
 }

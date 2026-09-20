@@ -270,6 +270,7 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 			d.Role, d.Vendor, h.allowed)
 	}
 
+	started := time.Now()
 	pane, err := h.r.AgentPane(ctx, h.workspaceID, h.tab, h.cwd)
 	if err != nil {
 		return fmt.Errorf("preparing a pane for %s: %w", d.Role, err)
@@ -292,7 +293,24 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 		}
 		return err
 	}
-	return nil
+
+	// --wait returns on the first settled state herdr observes, which can be a
+	// pause mid-task. Closing the pane then would kill a working agent, so
+	// hold it open until the agent has actually reported.
+	if d.ReportPath == "" {
+		return nil
+	}
+	var deadline time.Time
+	if d.Timeout > 0 {
+		deadline = started.Add(d.Timeout)
+	}
+	return build.AwaitReport(ctx, d.ReportPath, deadline, func(ctx context.Context) (bool, error) {
+		st, err := h.r.AgentState(ctx, d.Name)
+		if err != nil {
+			return false, err
+		}
+		return st != runner.StateWorking, nil
+	})
 }
 
 func (h *herdrAgent) Notify(ctx context.Context, title, body string) error {
