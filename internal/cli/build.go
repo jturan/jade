@@ -24,6 +24,10 @@ func newBuildCmd() *cobra.Command {
 		buildTimeout  time.Duration
 		reviewTimeout time.Duration
 		explain       bool
+		autonomy      string
+		yolo          bool
+		all           bool
+		maxAutoMerges int
 	)
 
 	cmd := &cobra.Command{
@@ -60,8 +64,20 @@ func newBuildCmd() *cobra.Command {
 				}
 			}
 
+			if yolo {
+				autonomy = string(state.AutonomyFull)
+			}
 			if explain {
-				return explainReady(out, ready, target)
+				return explainReady(out, ready, target, state.Autonomy(autonomy), protectedPaths())
+			}
+
+			if yolo {
+				autonomy = string(state.AutonomyFull)
+			}
+			switch state.Autonomy(autonomy) {
+			case "", state.AutonomyGated, state.AutonomyMerge, state.AutonomyFull:
+			default:
+				return fmt.Errorf("unknown autonomy %q (gated, merge, or full)", autonomy)
 			}
 
 			resolved, err := config.Load()
@@ -85,33 +101,59 @@ func newBuildCmd() *cobra.Command {
 					cwd:         root,
 					allowed:     resolved.Profile.AllowedVendors,
 				},
-				Git:           gitx.New(root),
-				Store:         store,
-				Prompts:       promptSet{},
-				Config:        resolved,
-				Root:          root,
-				BuildTimeout:  buildTimeout,
-				ReviewTimeout: reviewTimeout,
+				Git:              gitx.New(root),
+				Store:            store,
+				Prompts:          promptSet{},
+				Config:           resolved,
+				Root:             root,
+				BuildTimeout:     buildTimeout,
+				ReviewTimeout:    reviewTimeout,
+				AutonomyOverride: state.Autonomy(autonomy),
+				ProtectedPaths:   resolved.Profile.ProtectedPaths,
+				MaxAutoMerges:    maxAutoMerges,
 				Log: func(format string, args ...any) {
 					fmt.Fprintf(out, "%s %s\n", okStyle.Render("·"), fmt.Sprintf(format, args...))
 				},
 			}
 
-			res, err := build.RunUnit(ctx, deps, target.Issue, target.Unit)
-			if err != nil {
-				return err
-			}
+			for {
+				res, err := build.RunUnit(ctx, deps, target.Issue, target.Unit)
+				if err != nil {
+					return err
+				}
 
-			switch res.Outcome {
-			case build.OutcomePR:
-				fmt.Fprintf(out, "\n%s #%d ready for you: %s\n", okStyle.Render("✓"), target.Issue.Number, res.PRURL)
-				fmt.Fprintln(out, dimStyle.Render("Merge it, then run jade build again for the next unit."))
-			case build.OutcomeBlocked:
-				fmt.Fprintf(out, "\n%s #%d blocked after %d attempts: %s\n",
-					failStyle.Render("✗"), target.Issue.Number, res.Attempts, res.Reason)
-				fmt.Fprintf(out, "%s\n", dimStyle.Render("Work in progress is on "+res.Branch+"."))
+				switch res.Outcome {
+				case build.OutcomeMerged:
+					deps.AutoMergesSoFar++
+					fmt.Fprintf(out, "\n%s #%d merged — %s\n",
+						okStyle.Render("✓"), target.Issue.Number, res.Autonomy.Reason)
+				case build.OutcomePR:
+					fmt.Fprintf(out, "\n%s #%d ready for you: %s\n",
+						okStyle.Render("✓"), target.Issue.Number, res.PRURL)
+					fmt.Fprintf(out, "%s\n", dimStyle.Render("Not merged: "+res.Autonomy.Reason))
+				case build.OutcomeBlocked:
+					fmt.Fprintf(out, "\n%s #%d blocked after %d attempts: %s\n",
+						failStyle.Render("✗"), target.Issue.Number, res.Attempts, res.Reason)
+					fmt.Fprintf(out, "%s\n", dimStyle.Render("Work in progress is on "+res.Branch+"."))
+				}
+
+				// Continue only when the last unit merged itself. A unit left
+				// waiting for a human is the point at which to stop: the next
+				// unit may well depend on it.
+				if !all || res.Outcome != build.OutcomeMerged {
+					return nil
+				}
+
+				ready, err = store.ListReady(ctx)
+				if err != nil {
+					return err
+				}
+				if len(ready) == 0 {
+					fmt.Fprintf(out, "\n%s\n", dimStyle.Render("nothing left that is ready"))
+					return nil
+				}
+				target = ready[0]
 			}
-			return nil
 		},
 	}
 
@@ -122,11 +164,16 @@ func newBuildCmd() *cobra.Command {
 	f.DurationVar(&buildTimeout, "build-timeout", 45*time.Minute, "how long a builder may run")
 	f.DurationVar(&reviewTimeout, "review-timeout", 20*time.Minute, "how long a reviewer may run")
 	f.BoolVar(&explain, "explain", false, "show what would run, without dispatching anything")
+	f.StringVar(&autonomy, "autonomy", "", "override each unit's level: gated, merge, or full")
+	f.BoolVar(&yolo, "yolo", false, "alias for --autonomy full")
+	f.BoolVar(&all, "all", false, "keep building ready units until none are left")
+	f.IntVar(&maxAutoMerges, "max-auto-merges", build.DefaultMaxAutoMerges,
+		"stop after this many unattended merges in one run")
 
 	return cmd
 }
 
-func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Ready, target state.Ready) error {
+func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Ready, target state.Ready, override state.Autonomy, protected []string) error {
 	fmt.Fprintf(out, "%d unit(s) ready. Next: #%d %s\n\n",
 		len(ready), target.Issue.Number, target.Issue.Title)
 
@@ -134,7 +181,27 @@ func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Rea
 	fmt.Fprintf(out, "  code review    %s/%s\n", orDefault(target.Unit.CodeReview.Model), orDefault(target.Unit.CodeReview.Effort))
 	fmt.Fprintf(out, "  security       %v\n", target.Unit.SecurityReview)
 	fmt.Fprintf(out, "  retries        %d\n", target.Unit.RetryLimit)
-	fmt.Fprintf(out, "  autonomy       %s\n", target.Unit.Autonomy)
+	level := target.Unit.Autonomy
+	if override != "" {
+		level = override
+	}
+	fmt.Fprintf(out, "  autonomy       %s\n", level)
+
+	// Show the guardrails that can already be evaluated. Attempts and test
+	// results are unknowable until the builder has run, so assume the best
+	// case: this is the ceiling, not a promise.
+	decision := build.DecideAutonomy(build.AutonomyInput{
+		Level:          level,
+		SecurityReview: target.Unit.SecurityReview,
+		Attempts:       1,
+		TestsRun:       true,
+		ProtectedPaths: protected,
+	})
+	verdict := "would stop at the PR"
+	if decision.Merge {
+		verdict = "could merge itself"
+	}
+	fmt.Fprintf(out, "  on success     %s — %s\n", verdict, decision.Reason)
 	fmt.Fprintf(out, "  branch         %s\n", gitx.BranchName(target.Issue.Number, target.Issue.Title))
 
 	if len(ready) > 1 {
@@ -147,6 +214,16 @@ func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Rea
 		fmt.Fprintf(out, "\nAlso ready: %s\n", strings.Join(others, " "))
 	}
 	return nil
+}
+
+// protectedPaths reads the active profile's protected globs, falling back to
+// the built-in defaults. Explain must not fail just because config is missing.
+func protectedPaths() []string {
+	resolved, err := config.Load()
+	if err != nil {
+		return nil
+	}
+	return resolved.Profile.ProtectedPaths
 }
 
 func orDefault(s string) string {

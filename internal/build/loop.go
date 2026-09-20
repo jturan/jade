@@ -39,6 +39,8 @@ type Git interface {
 	CommitAll(ctx context.Context, message string) error
 	Push(ctx context.Context, branch string) error
 	CreatePR(ctx context.Context, title, body, base string) (string, error)
+	ChangedFiles(ctx context.Context, base string) ([]string, error)
+	MergePR(ctx context.Context, url string) error
 }
 
 // Store is the subset of the state store the loop needs.
@@ -67,6 +69,15 @@ type Deps struct {
 	// BuildTimeout and ReviewTimeout bound a single agent run.
 	BuildTimeout  time.Duration
 	ReviewTimeout time.Duration
+	// AutonomyOverride, when set, replaces the unit's own autonomy level for
+	// this run.
+	AutonomyOverride state.Autonomy
+	// ProtectedPaths force a gate regardless of autonomy. Empty means the
+	// built-in defaults.
+	ProtectedPaths []string
+	// AutoMergesSoFar and MaxAutoMerges cap unattended merges per run.
+	AutoMergesSoFar int
+	MaxAutoMerges   int
 	// Log receives human-readable progress.
 	Log func(format string, args ...any)
 }
@@ -77,6 +88,8 @@ type Outcome string
 const (
 	// OutcomePR means a pull request is open and waiting for a human.
 	OutcomePR Outcome = "pr"
+	// OutcomeMerged means autonomy permitted the unit to merge itself.
+	OutcomeMerged Outcome = "merged"
 	// OutcomeBlocked means the unit exhausted its retries and needs a human.
 	OutcomeBlocked Outcome = "blocked"
 )
@@ -88,6 +101,9 @@ type Result struct {
 	Branch   string
 	Attempts int
 	Reason   string
+	// Autonomy records why the unit did or did not merge itself. It is always
+	// set, because a silent auto-merge is indistinguishable from a bug.
+	Autonomy AutonomyDecision
 }
 
 // RunUnit takes one unit from ready to either an open pull request or an
@@ -191,7 +207,48 @@ func RunUnit(ctx context.Context, d Deps, issue state.Issue, unit state.Unit) (*
 		}
 		log("pull request open: %s", url)
 
-		return &Result{Outcome: OutcomePR, PRURL: url, Branch: branch, Attempts: attempt}, nil
+		changedFiles, err := d.Git.ChangedFiles(ctx, base)
+		if err != nil {
+			return nil, err
+		}
+		level := unit.Autonomy
+		if d.AutonomyOverride != "" {
+			level = d.AutonomyOverride
+		}
+		decision := DecideAutonomy(AutonomyInput{
+			Level:           level,
+			SecurityReview:  unit.SecurityReview,
+			Attempts:        attempt,
+			TestsRun:        report.TestsRun,
+			ReviewsBlocking: len(blockingReviews(reviews)),
+			ChangedFiles:    changedFiles,
+			ProtectedPaths:  d.ProtectedPaths,
+			AutoMergesSoFar: d.AutoMergesSoFar,
+			MaxAutoMerges:   d.MaxAutoMerges,
+		})
+
+		result := &Result{PRURL: url, Branch: branch, Attempts: attempt, Autonomy: decision}
+		if !decision.Merge {
+			log("not merging: %s", decision.Reason)
+			result.Outcome = OutcomePR
+			return result, nil
+		}
+
+		if err := d.Git.MergePR(ctx, url); err != nil {
+			return nil, fmt.Errorf("auto-merge: %w", err)
+		}
+		if err := d.Store.SetStatus(ctx, issue.Number, state.StatusDone); err != nil {
+			return nil, err
+		}
+		// Record it on the issue: an unattended merge must leave a trail
+		// someone can audit afterwards.
+		if err := d.Store.Comment(ctx, issue.Number,
+			fmt.Sprintf("Merged automatically — %s.\n\n%s", decision.Reason, url)); err != nil {
+			return nil, err
+		}
+		log("merged automatically: %s", decision.Reason)
+		result.Outcome = OutcomeMerged
+		return result, nil
 	}
 
 	return escalate(ctx, d, issue, branch, attempts, previous)
