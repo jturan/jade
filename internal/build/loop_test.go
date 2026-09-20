@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,10 @@ import (
 type fakeAgent struct {
 	root string
 	// scripts maps a role to the sequence of reports it will produce.
-	scripts  map[config.Role][]Report
-	calls    []Dispatch
-	notified []string
+	scripts   map[config.Role][]Report
+	calls     []Dispatch
+	notified  []string
+	notifyErr error
 }
 
 func (f *fakeAgent) Dispatch(_ context.Context, d Dispatch) error {
@@ -49,7 +51,7 @@ func (f *fakeAgent) Dispatch(_ context.Context, d Dispatch) error {
 
 func (f *fakeAgent) Notify(_ context.Context, title, _ string) error {
 	f.notified = append(f.notified, title)
-	return nil
+	return f.notifyErr
 }
 
 func (f *fakeAgent) dispatchedRoles() []config.Role {
@@ -421,6 +423,32 @@ func TestRetriedUnitIsNotAutoMerged(t *testing.T) {
 	}
 	if !strings.Contains(res.Autonomy.Reason, "attempts") {
 		t.Errorf("reason = %q", res.Autonomy.Reason)
+	}
+}
+
+// Losing a notification is annoying; losing the run because a toast could not
+// be drawn is worse. A notification failure must never fail the loop.
+func TestNotifyFailureDoesNotFailTheLoop(t *testing.T) {
+	root := t.TempDir()
+	fail := Report{Verdict: VerdictBlocked, Summary: "tests fail"}
+	agent := &fakeAgent{
+		root:      root,
+		scripts:   map[config.Role][]Report{config.RoleBuilder: {fail, fail, fail}},
+		notifyErr: errors.New("no notification daemon"),
+	}
+	store := &fakeStore{}
+
+	res, err := RunUnit(context.Background(), newDeps(t, agent, &fakeGit{clean: true, changes: true}, store), testIssue(), testUnit())
+	if err != nil {
+		t.Fatalf("a failed notification failed the run: %v", err)
+	}
+	if res.Outcome != OutcomeBlocked {
+		t.Errorf("outcome = %q, want blocked", res.Outcome)
+	}
+	// The durable record must still exist, since that is what a human will
+	// actually read.
+	if len(store.comments) != 1 {
+		t.Error("the issue comment is the durable record and must still be written")
 	}
 }
 
