@@ -304,12 +304,14 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 	if d.Timeout > 0 {
 		deadline = started.Add(d.Timeout)
 	}
+	// Settled, not "not working": an unknown state is not evidence the agent
+	// stopped, and counting it would close the pane on a working agent.
 	return build.AwaitReport(ctx, d.ReportPath, deadline, func(ctx context.Context) (bool, error) {
 		st, err := h.r.AgentState(ctx, d.Name)
 		if err != nil {
 			return false, err
 		}
-		return st != runner.StateWorking, nil
+		return st.Settled(), nil
 	})
 }
 
