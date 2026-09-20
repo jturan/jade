@@ -290,6 +290,13 @@ func (r *Runner) AgentState(ctx context.Context, target string) (State, error) {
 	return agent.Status, nil
 }
 
+// FocusAgent brings an agent's pane to the front. Used when the operator is
+// meant to take over the conversation, which is the one case where stealing
+// focus is the helpful thing to do.
+func (r *Runner) FocusAgent(ctx context.Context, target string) error {
+	return r.call(ctx, nil, "agent", "focus", target)
+}
+
 // ReadSource selects which slice of a pane's output to read.
 type ReadSource string
 

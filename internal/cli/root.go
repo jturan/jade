@@ -25,6 +25,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newBuildCmd(),
 		newConfigCmd(),
+		newDiscoveryCmd(),
 		newDoctorCmd(),
 		newInitCmd(),
 		newLabelsCmd(),
