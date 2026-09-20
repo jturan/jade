@@ -250,36 +250,43 @@ func (s *Store) UpdateBody(ctx context.Context, number int, body string) error {
 	return s.gh(ctx, nil, "issue", "edit", strconv.Itoa(number), "--body", body)
 }
 
-// labelSpec is a label jade manages, with a fixed color and description so
+// LabelSpec is a label jade manages, with a fixed color and description so
 // every repo it touches looks the same.
-type labelSpec struct {
-	name, color, description string
+type LabelSpec struct {
+	Name        string
+	Color       string
+	Description string
 }
 
-func managedLabels() []labelSpec {
-	return []labelSpec{
+// LabelTracking marks the issue holding an initiative's sequence.
+const LabelTracking = "tracking"
+
+// ManagedLabels is jade's full taxonomy. Every status must appear here, or a
+// repo would be missing a label the build loop later tries to apply.
+func ManagedLabels() []LabelSpec {
+	return []LabelSpec{
 		{string(StatusReady), "0E8A16", "Unit is specced and ready to dispatch"},
 		{string(StatusInProgress), "FBCA04", "Builder is working this unit"},
 		{string(StatusReview), "1D76DB", "Awaiting code and/or security review"},
 		{string(StatusBlocked), "B60205", "Retry limit hit; needs human attention"},
 		{string(StatusDone), "5319E7", "Merged and closed"},
 		{LabelUnitOfWork, "C5DEF5", "One independently reviewable PR"},
-		{"tracking", "BFD4F2", "Sequence and status for an initiative"},
+		{LabelTracking, "BFD4F2", "Sequence and status for an initiative"},
 	}
 }
 
 // EnsureLabels creates or updates jade's label taxonomy. Idempotent, so a new
 // repo is bootstrapped on first use rather than as a remembered chore.
 func (s *Store) EnsureLabels(ctx context.Context) error {
-	for _, l := range managedLabels() {
+	for _, l := range ManagedLabels() {
 		err := s.gh(ctx, nil,
-			"label", "create", l.name,
-			"--color", l.color,
-			"--description", l.description,
+			"label", "create", l.Name,
+			"--color", l.Color,
+			"--description", l.Description,
 			"--force",
 		)
 		if err != nil {
-			return fmt.Errorf("label %q: %w", l.name, err)
+			return fmt.Errorf("label %q: %w", l.Name, err)
 		}
 	}
 	return nil

@@ -275,3 +275,27 @@ func TestIssueStatusAndClosed(t *testing.T) {
 		t.Error("an issue with no status label should report an empty status")
 	}
 }
+
+// Every status must have a managed label. A status the build loop applies but
+// `labels sync` never creates would fail on a fresh repo — and only at the
+// moment the loop tried to use it.
+func TestManagedLabelsCoverEveryStatus(t *testing.T) {
+	managed := map[string]bool{}
+	for _, l := range ManagedLabels() {
+		if l.Color == "" || l.Description == "" {
+			t.Errorf("label %q is missing a color or description", l.Name)
+		}
+		managed[l.Name] = true
+	}
+
+	for _, s := range Statuses() {
+		if !managed[string(s)] {
+			t.Errorf("status %q has no managed label", s)
+		}
+	}
+	for _, required := range []string{LabelUnitOfWork, LabelTracking} {
+		if !managed[required] {
+			t.Errorf("%q is not in the managed taxonomy", required)
+		}
+	}
+}
