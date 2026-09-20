@@ -78,6 +78,8 @@ type Dispatch struct {
 	Effort  string
 	Prompt  string
 	Timeout time.Duration
+	// Args are native flags for the agent CLI, from the profile.
+	Args []string
 }
 
 // Git is the subset of git operations the loop needs.
@@ -387,6 +389,7 @@ func runBuilder(
 		Effort:  agent.Effort,
 		Prompt:  prompt,
 		Timeout: d.BuildTimeout,
+		Args:    resolved.ArgsFor(config.RoleBuilder),
 	}, issue.Number, attempt, reportPath)
 }
 
@@ -430,6 +433,7 @@ func runReviews(
 			Effort:  agent.Effort,
 			Prompt:  prompt,
 			Timeout: d.ReviewTimeout,
+			Args:    resolved.ArgsFor(role),
 		}, issue.Number, 1, path)
 		if err != nil {
 			return nil, err

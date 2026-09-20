@@ -35,6 +35,28 @@ point.
 your repos live, and where discovery notes should be written. That file is
 machine-local and never committed.
 
+### Letting agents work without approval prompts
+
+A builder started in a fresh pane will stop at its first permission dialog. jade
+deliberately refuses to answer those on your behalf, so the unit would burn its
+retries sitting at a prompt.
+
+Give each role the flags its CLI needs, in the profile:
+
+```yaml
+profiles:
+  - name: personal
+    agent_args:
+      builder: ["--dangerously-skip-permissions"]
+```
+
+This is a **profile** setting, not a per-unit one: it describes how much a given
+machine trusts its agents, and a unit of work must not be able to widen the
+permissions it runs under. It is empty by default — granting an agent unattended
+write access is a decision to make per machine, not one jade should ship.
+
+Reviewers only read, so they usually need less than builders do.
+
 ## Phase 1 — Discovery
 
 No repo required. This is for an idea that may not survive.

@@ -75,6 +75,7 @@ func newRunCmd() *cobra.Command {
 				Name:   name,
 				Kind:   kind,
 				PaneID: pane.PaneID,
+				Args:   resolved.ArgsFor(config.Role(role)),
 			}); err != nil {
 				return fmt.Errorf("starting %s: %w", kind, err)
 			}

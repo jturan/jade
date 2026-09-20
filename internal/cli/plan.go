@@ -95,6 +95,7 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	}
 	if err := r.StartAgent(ctx, runner.StartOpts{
 		Name: "jade-planner", Kind: agent.Vendor, PaneID: pane.PaneID,
+		Args: resolved.ArgsFor(config.RolePlanning),
 	}); err != nil {
 		return fmt.Errorf("starting planner: %w", err)
 	}

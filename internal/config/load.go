@@ -167,6 +167,11 @@ func MergeAgents(base map[Role]Agent, override map[Role]Agent, layer string) (ma
 	return agents, origins
 }
 
+// ArgsFor returns the native agent flags configured for a role on this machine.
+func (r *Resolved) ArgsFor(role Role) []string {
+	return r.Profile.AgentArgs[role]
+}
+
 // ApplyUnit layers a unit-of-work's per-role overrides onto an already-resolved
 // config, returning a copy. Used by the build loop when an issue's YAML block
 // pins a different model or effort for one unit.

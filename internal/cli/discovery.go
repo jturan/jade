@@ -87,6 +87,7 @@ func newDiscoveryCmd() *cobra.Command {
 			}
 			if err := r.StartAgent(cmd.Context(), runner.StartOpts{
 				Name: "jade-discovery", Kind: agent.Vendor, PaneID: pane.PaneID,
+				Args: resolved.ArgsFor(config.RoleDiscovery),
 			}); err != nil {
 				return fmt.Errorf("starting discovery: %w", err)
 			}
