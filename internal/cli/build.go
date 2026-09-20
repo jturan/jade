@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -42,6 +43,14 @@ func newBuildCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			store := state.NewStore(repo)
 
+			// --explain is a dry run and must not write labels. Skipping
+			// reconcile leaves its answer unchanged: ListReady already counts
+			// a closed dependency as satisfied, whatever its label says.
+			if !explain {
+				if err := reconcile(ctx, store, out); err != nil {
+					return err
+				}
+			}
 			ready, err := store.ListReady(ctx)
 			if err != nil {
 				return err
@@ -154,6 +163,9 @@ func newBuildCmd() *cobra.Command {
 					return nil
 				}
 
+				if err := reconcile(ctx, store, out); err != nil {
+					return err
+				}
 				ready, err = store.ListReady(ctx)
 				if err != nil {
 					return err
@@ -320,4 +332,20 @@ func (promptSet) Review(role config.Role, issue state.Issue, reportPath, base st
 		"ReportPath":  reportPath,
 		"Base":        base,
 	})
+}
+
+// reconcile brings closed units' labels up to date before a pass reads state,
+// so a PR a human merged since the last pass counts as done.
+func reconcile(ctx context.Context, store *state.Store, out io.Writer) error {
+	changes, err := store.Reconcile(ctx)
+	for _, c := range changes {
+		if c.Moved {
+			fmt.Fprintf(out, "%s #%d merged: %s → %s\n",
+				okStyle.Render("·"), c.Issue.Number, c.From, state.StatusDone)
+			continue
+		}
+		fmt.Fprintf(out, "%s #%d %s; left at %s\n",
+			okStyle.Render("·"), c.Issue.Number, c.Reason, c.From)
+	}
+	return err
 }

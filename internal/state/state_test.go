@@ -299,3 +299,140 @@ func TestManagedLabelsCoverEveryStatus(t *testing.T) {
 		}
 	}
 }
+
+// recordingStore answers `issue list` with a canned listing and `pr view` with
+// the pull request's state from prStates, and records every other gh call, so a
+// test can assert which edits were made.
+func recordingStore(listing string, prStates map[string]string) (*Store, *[][]string) {
+	var calls [][]string
+	s := &Store{}
+	s.run = func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "list" {
+			return []byte(listing), nil, nil
+		}
+		if len(args) >= 3 && args[0] == "pr" && args[1] == "view" {
+			return []byte(`{"state":"` + prStates[args[2]] + `"}`), nil, nil
+		}
+		calls = append(calls, args)
+		return nil, nil, nil
+	}
+	return s, &calls
+}
+
+func TestReconcile(t *testing.T) {
+	prStates := map[string]string{
+		"https://github.com/o/r/pull/1": "MERGED",
+		"https://github.com/o/r/pull/2": "CLOSED",
+	}
+	tests := []struct {
+		name      string
+		issue     string
+		wantEdit  bool
+		wantMoved bool
+		wantSeen  bool
+	}{
+		{
+			name:      "closed completed in review moves to done",
+			issue:     `{"number":27,"state":"CLOSED","stateReason":"COMPLETED","closedByPullRequestsReferences":[{"number":1,"url":"https://github.com/o/r/pull/1"}],"labels":[{"name":"agent:review"}]}`,
+			wantEdit:  true,
+			wantMoved: true,
+			wantSeen:  true,
+		},
+		{
+			name:      "closed completed in progress moves to done",
+			issue:     `{"number":28,"state":"CLOSED","stateReason":"COMPLETED","closedByPullRequestsReferences":[{"number":2,"url":"https://github.com/o/r/pull/2"},{"number":1,"url":"https://github.com/o/r/pull/1"}],"labels":[{"name":"agent:in-progress"}]}`,
+			wantEdit:  true,
+			wantMoved: true,
+			wantSeen:  true,
+		},
+		{
+			// GitHub records COMPLETED for a plain Close click as well.
+			name:     "closed completed with no linked pr is left alone",
+			issue:    `{"number":32,"state":"CLOSED","stateReason":"COMPLETED","closedByPullRequestsReferences":[],"labels":[{"name":"agent:review"}]}`,
+			wantSeen: true,
+		},
+		{
+			name:     "closed completed with an unmerged pr is left alone",
+			issue:    `{"number":33,"state":"CLOSED","stateReason":"COMPLETED","closedByPullRequestsReferences":[{"number":2,"url":"https://github.com/o/r/pull/2"}],"labels":[{"name":"agent:in-progress"}]}`,
+			wantSeen: true,
+		},
+		{
+			name:     "closed not planned is left alone",
+			issue:    `{"number":29,"state":"CLOSED","stateReason":"NOT_PLANNED","labels":[{"name":"agent:review"}]}`,
+			wantSeen: true,
+		},
+		{
+			name:  "open in review is left alone",
+			issue: `{"number":30,"state":"OPEN","stateReason":"","labels":[{"name":"agent:review"}]}`,
+		},
+		{
+			name:  "already done makes no gh call",
+			issue: `{"number":31,"state":"CLOSED","stateReason":"COMPLETED","labels":[{"name":"agent:done"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, calls := recordingStore("["+tt.issue+"]", prStates)
+			got, err := s.Reconcile(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.wantEdit {
+				if len(*calls) != 1 {
+					t.Fatalf("gh calls = %v, want one label edit", *calls)
+				}
+				cmd := strings.Join((*calls)[0], " ")
+				if !strings.Contains(cmd, "--add-label agent:done") {
+					t.Errorf("edit = %q, want it to add agent:done", cmd)
+				}
+			} else if len(*calls) != 0 {
+				t.Errorf("gh calls = %v, want none", *calls)
+			}
+
+			if !tt.wantSeen {
+				if len(got) != 0 {
+					t.Errorf("reconciliations = %+v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("reconciliations = %+v, want one", got)
+			}
+			if got[0].Moved != tt.wantMoved {
+				t.Errorf("moved = %v, want %v", got[0].Moved, tt.wantMoved)
+			}
+		})
+	}
+}
+
+// Reconciling twice must change nothing the second time: once the label reads
+// agent:done, the issue is no longer a candidate.
+func TestReconcileIsIdempotent(t *testing.T) {
+	const after = `[{"number":27,"state":"CLOSED","stateReason":"COMPLETED","labels":[{"name":"agent:done"}]}]`
+	s, calls := recordingStore(after, nil)
+	got, err := s.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 || len(*calls) != 0 {
+		t.Errorf("second pass changed state: reconciliations %+v, calls %v", got, *calls)
+	}
+}
+
+func TestReconcileReportsEditFailure(t *testing.T) {
+	s := &Store{}
+	s.run = func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		if args[1] == "list" {
+			return []byte(`[{"number":27,"state":"CLOSED","stateReason":"COMPLETED","closedByPullRequestsReferences":[{"number":1,"url":"https://github.com/o/r/pull/1"}],"labels":[{"name":"agent:review"}]}]`), nil, nil
+		}
+		if args[1] == "view" {
+			return []byte(`{"state":"MERGED"}`), nil, nil
+		}
+		return nil, []byte("HTTP 403"), errors.New("exit 1")
+	}
+	if _, err := s.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "#27") {
+		t.Errorf("err = %v, want a failure naming #27", err)
+	}
+}
