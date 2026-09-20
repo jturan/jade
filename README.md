@@ -69,6 +69,8 @@ which vendors are permitted, and where discovery notes are written. A personal
 laptop might write discovery notes to an Obsidian vault; a work laptop writes
 them to `docs/discovery/` in the repo instead.
 
+See [docs/WORKFLOW.md](docs/WORKFLOW.md) for what you actually run, and when.
+
 ## Requirements
 
 - [herdr](https://herdr.dev) — the multiplexer agents run in
