@@ -4,8 +4,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Role names an agent's job in the pipeline. Each role carries its own model
@@ -20,6 +23,10 @@ const (
 	RoleCodeReview   Role = "code_review"
 	RoleSecReview    Role = "security_review"
 )
+
+// SinkRepo is the discovery_sink value meaning "write into docs/discovery/ of
+// the repo being worked on" rather than an external notes directory.
+const SinkRepo = "repo"
 
 // Agent is the model configuration for a single role.
 type Agent struct {
@@ -63,6 +70,23 @@ func DefaultAgents() map[Role]Agent {
 		RoleCodeReview:   {Vendor: "claude", Model: "sonnet", Effort: "medium"},
 		RoleSecReview:    {Vendor: "claude", Model: "opus", Effort: "high"},
 	}
+}
+
+// ReadFile parses a config file from disk.
+func ReadFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no config at %s (run: jade init)", path)
+		}
+		return nil, err
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return &cfg, nil
 }
 
 // Dir returns the directory holding config.yml and any prompt overrides,
