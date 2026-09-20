@@ -43,8 +43,13 @@ func newBuildCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			store := state.NewStore(repo)
 
-			if err := reconcile(ctx, store, out); err != nil {
-				return err
+			// --explain is a dry run and must not write labels. Skipping
+			// reconcile leaves its answer unchanged: ListReady already counts
+			// a closed dependency as satisfied, whatever its label says.
+			if !explain {
+				if err := reconcile(ctx, store, out); err != nil {
+					return err
+				}
 			}
 			ready, err := store.ListReady(ctx)
 			if err != nil {
