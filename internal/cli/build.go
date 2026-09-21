@@ -266,11 +266,6 @@ type paneRunner interface {
 	Notify(ctx context.Context, title, body string) error
 }
 
-// untimedAwaitCap bounds the wait for a report when a role has no timeout of
-// its own. A zero --build-timeout says an agent may work as long as it likes;
-// it does not say the loop should sit on a dead pane until someone notices.
-const untimedAwaitCap = 30 * time.Minute
-
 // herdrAgent dispatches build.Dispatch requests into herdr panes.
 type herdrAgent struct {
 	r           paneRunner
@@ -319,14 +314,16 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 	return build.AwaitReport(ctx, d.ReportPath, awaitDeadline(started, d.Timeout), h.gone(d.Name))
 }
 
-// awaitDeadline bounds the wait for an agent's report. A zero role timeout
-// says the agent may work as long as it likes, so the bound falls back to
-// untimedAwaitCap rather than to none at all.
+// awaitDeadline bounds the wait for an agent's report by the role's own
+// timeout, measured from the start of the run. A zero timeout says the agent
+// may work as long as it likes and gets no deadline: capping it here would
+// make "no timeout" mean less time than the default, and the pane is not left
+// on a dead agent regardless — the gone probe ends that wait.
 func awaitDeadline(started time.Time, timeout time.Duration) time.Time {
 	if timeout > 0 {
 		return started.Add(timeout)
 	}
-	return time.Now().Add(untimedAwaitCap)
+	return time.Time{}
 }
 
 // gone reports whether herdr has no such agent any more — it exited, or its

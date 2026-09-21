@@ -148,20 +148,17 @@ func TestGoneOnlyCountsAnAgentHerdrNoLongerHas(t *testing.T) {
 	}
 }
 
-// A role with no timeout lets an agent work as long as it likes. It does not
-// let a pane nobody is watching hold the loop until the process is killed.
-func TestAwaitDeadlineIsBoundedWithoutARoleTimeout(t *testing.T) {
+// The deadline is the role's own timeout and nothing else. A role with no
+// timeout gets none: an agent that dies is caught by the gone probe, not by a
+// cap that would quietly mean less time than the default.
+func TestAwaitDeadlineIsTheRoleTimeout(t *testing.T) {
 	started := time.Now()
 
 	if got := awaitDeadline(started, time.Hour); !got.Equal(started.Add(time.Hour)) {
 		t.Errorf("deadline = %s, want the role timeout measured from the start of the run", got)
 	}
 
-	got := awaitDeadline(started, 0)
-	if got.IsZero() {
-		t.Fatal("a role with no timeout got no deadline, so AwaitReport would wait for ever")
-	}
-	if got.After(time.Now().Add(untimedAwaitCap + time.Minute)) {
-		t.Errorf("deadline = %s, want it within %s", got, untimedAwaitCap)
+	if got := awaitDeadline(started, 0); !got.IsZero() {
+		t.Errorf("deadline = %s, want no deadline when the role has no timeout", got)
 	}
 }
