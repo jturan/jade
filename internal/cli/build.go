@@ -262,8 +262,14 @@ type paneRunner interface {
 	ClosePane(ctx context.Context, paneID string) error
 	StartAgent(ctx context.Context, opts runner.StartOpts) error
 	Prompt(ctx context.Context, target, text string, wait bool, timeout time.Duration) error
+	GetAgent(ctx context.Context, target string) (runner.Agent, error)
 	Notify(ctx context.Context, title, body string) error
 }
+
+// untimedAwaitCap bounds the wait for a report when a role has no timeout of
+// its own. A zero --build-timeout says an agent may work as long as it likes;
+// it does not say the loop should sit on a dead pane until someone notices.
+const untimedAwaitCap = 30 * time.Minute
 
 // herdrAgent dispatches build.Dispatch requests into herdr panes.
 type herdrAgent struct {
@@ -310,11 +316,29 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 	if d.ReportPath == "" {
 		return nil
 	}
-	var deadline time.Time
-	if d.Timeout > 0 {
-		deadline = started.Add(d.Timeout)
+	return build.AwaitReport(ctx, d.ReportPath, awaitDeadline(started, d.Timeout), h.gone(d.Name))
+}
+
+// awaitDeadline bounds the wait for an agent's report. A zero role timeout
+// says the agent may work as long as it likes, so the bound falls back to
+// untimedAwaitCap rather than to none at all.
+func awaitDeadline(started time.Time, timeout time.Duration) time.Time {
+	if timeout > 0 {
+		return started.Add(timeout)
 	}
-	return build.AwaitReport(ctx, d.ReportPath, deadline)
+	return time.Now().Add(untimedAwaitCap)
+}
+
+// gone reports whether herdr has no such agent any more — it exited, or its
+// pane died. That is the one trustworthy sign an agent has stopped for good:
+// a settled state is not, because `agent prompt --wait` returns on settled
+// states that turn out to be pauses mid-task. Any other error is a failure to
+// ask rather than an answer, so it counts as the agent still being there.
+func (h *herdrAgent) gone(name string) func(context.Context) bool {
+	return func(ctx context.Context) bool {
+		_, err := h.r.GetAgent(ctx, name)
+		return runner.HasCode(err, runner.CodeAgentNotFound)
+	}
 }
 
 func (h *herdrAgent) Notify(ctx context.Context, title, body string) error {

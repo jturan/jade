@@ -54,7 +54,7 @@ func newReportCmd() *cobra.Command {
 					"%d unit(s) completed; %d needed at least one retry", units, retried)))
 			}
 			fmt.Fprintf(out, "%s\n", dimStyle.Render(
-				"Success rate ignores harness errors — a pane that failed to start says nothing about a model."))
+				"Success rate and mean duration ignore harness errors — a pane that failed to start says nothing about a model."))
 			return nil
 		},
 	}

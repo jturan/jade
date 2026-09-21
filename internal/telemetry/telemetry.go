@@ -147,7 +147,9 @@ type Stat struct {
 	OK                  int
 	Blocked             int
 	Errors              int
-	TotalSeconds        float64
+	// JudgedSeconds is the time spent on runs the model is answerable for.
+	// Harness errors are left out, so it is not the wall time of the group.
+	JudgedSeconds float64
 }
 
 // SuccessRate is the share of runs that reached a good outcome, ignoring
@@ -160,12 +162,17 @@ func (s Stat) SuccessRate() float64 {
 	return float64(s.OK) / float64(judged)
 }
 
-// MeanSeconds is the average duration of a run in this group.
+// MeanSeconds is the average duration of a judged run, ignoring harness
+// errors for the same reason SuccessRate does. An agent killed before it could
+// report, or one held to its role timeout after it died, measures the
+// environment rather than how long the model takes — and being a timeout, it
+// is far enough from a real run to move the mean on its own.
 func (s Stat) MeanSeconds() float64 {
-	if s.Runs == 0 {
+	judged := s.OK + s.Blocked
+	if judged == 0 {
 		return 0
 	}
-	return s.TotalSeconds / float64(s.Runs)
+	return s.JudgedSeconds / float64(judged)
 }
 
 // Key identifies a Stat group.
@@ -188,12 +195,13 @@ func Summarize(events []Event) []Stat {
 			groups[key] = s
 		}
 		s.Runs++
-		s.TotalSeconds += e.Seconds
 		switch e.Outcome {
 		case OutcomeOK:
 			s.OK++
+			s.JudgedSeconds += e.Seconds
 		case OutcomeBlocked:
 			s.Blocked++
+			s.JudgedSeconds += e.Seconds
 		case OutcomeError:
 			s.Errors++
 		}
