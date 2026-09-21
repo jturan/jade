@@ -255,9 +255,19 @@ func orDefault(s string) string {
 	return s
 }
 
+// paneRunner is the slice of runner.Runner herdrAgent uses. An interface so
+// tests can drive Dispatch without a live herdr server.
+type paneRunner interface {
+	AgentPane(ctx context.Context, workspaceID, tabLabel, cwd string) (runner.Pane, error)
+	ClosePane(ctx context.Context, paneID string) error
+	StartAgent(ctx context.Context, opts runner.StartOpts) error
+	Prompt(ctx context.Context, target, text string, wait bool, timeout time.Duration) error
+	Notify(ctx context.Context, title, body string) error
+}
+
 // herdrAgent dispatches build.Dispatch requests into herdr panes.
 type herdrAgent struct {
-	r           *runner.Runner
+	r           paneRunner
 	workspaceID string
 	tab         string
 	cwd         string
@@ -304,15 +314,7 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 	if d.Timeout > 0 {
 		deadline = started.Add(d.Timeout)
 	}
-	// Settled, not "not working": an unknown state is not evidence the agent
-	// stopped, and counting it would close the pane on a working agent.
-	return build.AwaitReport(ctx, d.ReportPath, deadline, func(ctx context.Context) (bool, error) {
-		st, err := h.r.AgentState(ctx, d.Name)
-		if err != nil {
-			return false, err
-		}
-		return st.Settled(), nil
-	})
+	return build.AwaitReport(ctx, d.ReportPath, deadline)
 }
 
 func (h *herdrAgent) Notify(ctx context.Context, title, body string) error {

@@ -11,13 +11,10 @@ import (
 
 func shortAwait(t *testing.T) {
 	t.Helper()
-	poll, quiet := awaitPoll, awaitQuiet
-	awaitPoll, awaitQuiet = 5*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { awaitPoll, awaitQuiet = poll, quiet })
+	poll := awaitPoll
+	awaitPoll = 5 * time.Millisecond
+	t.Cleanup(func() { awaitPoll = poll })
 }
-
-func working(context.Context) (bool, error) { return false, nil }
-func idle(context.Context) (bool, error)    { return true, nil }
 
 // A half-written report is not a report: AwaitReport keeps waiting until the
 // file parses.
@@ -32,7 +29,7 @@ func TestAwaitReportWaitsForAParsableReport(t *testing.T) {
 		_ = os.WriteFile(path, []byte(`{"verdict":"ok","tests_run":true}`), 0o644)
 	}()
 
-	if err := AwaitReport(context.Background(), path, time.Now().Add(5*time.Second), working); err != nil {
+	if err := AwaitReport(context.Background(), path, time.Now().Add(5*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadReport(path); err != nil {
@@ -40,27 +37,25 @@ func TestAwaitReportWaitsForAParsableReport(t *testing.T) {
 	}
 }
 
-// An agent that has stopped without reporting must not hold the loop until
-// the role timeout.
-func TestAwaitReportGivesUpOnASettledAgent(t *testing.T) {
-	shortAwait(t)
-	path := filepath.Join(t.TempDir(), "builder.json")
-
-	started := time.Now()
-	if err := AwaitReport(context.Background(), path, time.Now().Add(5*time.Second), idle); err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(started) > 2*time.Second {
-		t.Errorf("waited %s for an idle agent", time.Since(started))
-	}
-}
-
+// An agent that never reports is bounded by its role timeout, not left to
+// hold the loop forever.
 func TestAwaitReportHonoursTheDeadline(t *testing.T) {
 	shortAwait(t)
 	path := filepath.Join(t.TempDir(), "builder.json")
 
-	err := AwaitReport(context.Background(), path, time.Now().Add(30*time.Millisecond), working)
+	err := AwaitReport(context.Background(), path, time.Now().Add(30*time.Millisecond))
 	if err == nil || !strings.Contains(err.Error(), "timeout") {
 		t.Fatalf("err = %v, want a timeout", err)
+	}
+}
+
+func TestAwaitReportStopsWithTheContext(t *testing.T) {
+	shortAwait(t)
+	path := filepath.Join(t.TempDir(), "builder.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := AwaitReport(ctx, path, time.Time{}); err != context.Canceled {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
