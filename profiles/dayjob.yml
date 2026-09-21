@@ -1,0 +1,21 @@
+# The employer's laptop: their repos, their review culture.
+#
+# Shipped profiles hold only what is true on every machine of this kind. They
+# are committed to a public repo, so nothing here may name a path, a client, or
+# a machine — `jade init` asks for those and writes them to
+# ~/.config/jade/config.yml, which is never committed.
+name: dayjob
+git_host: github
+
+# Notes stay with the code they are about, so nothing from an employer lands in
+# a personal vault.
+discovery_sink: repo
+
+# One vendor, because an employer's answer to "which AI may read this code" is a
+# decision someone made once and wrote down.
+allowed_vendors:
+  - claude
+
+# Somewhere with code review as a norm, a machine merging its own work is the
+# wrong default however well the guardrails hold.
+review_strictness: strict

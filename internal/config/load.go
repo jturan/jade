@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,10 +12,34 @@ import (
 // Layer names where a resolved value came from. Reported by `jade config show`
 // so a machine behaving unexpectedly can be diagnosed without guesswork.
 const (
+	// LayerDefault is a value jade compiles in for every machine.
 	LayerDefault = "default"
+	// LayerShipped is a value from profiles/<name>.yml in this repo.
+	LayerShipped = "shipped"
+	// LayerProfile is a value from the local ~/.config/jade/config.yml.
 	LayerProfile = "profile"
-	LayerUnit    = "unit"
+	// LayerUnit is a value from an issue's YAML block.
+	LayerUnit = "unit"
 )
+
+// Profile field names, as they appear in YAML and in `jade config show`.
+const (
+	FieldGitHost          = "git_host"
+	FieldDiscoverySink    = "discovery_sink"
+	FieldAllowedVendors   = "allowed_vendors"
+	FieldReviewStrictness = "review_strictness"
+	FieldProtectedPaths   = "protected_paths"
+	FieldAgentArgs        = "agent_args"
+)
+
+// ProfileFields lists the profile settings `jade config show` reports, in the
+// order it prints them.
+func ProfileFields() []string {
+	return []string{
+		FieldGitHost, FieldDiscoverySink, FieldAllowedVendors,
+		FieldReviewStrictness, FieldProtectedPaths, FieldAgentArgs,
+	}
+}
 
 // Origin records which layer supplied each field of a resolved Agent.
 type Origin struct {
@@ -25,11 +50,20 @@ type Origin struct {
 
 // Resolved is the fully merged configuration for the active profile.
 type Resolved struct {
+	// ConfigPath is the local config file, whether or not it exists.
 	ConfigPath string
-	Profile    Profile
-	Agents     map[Role]Agent
-	Origins    map[Role]Origin
+	// HasLocal is false on a machine running entirely off shipped profiles.
+	HasLocal bool
+	Profile  Profile
+	Agents   map[Role]Agent
+	Origins  map[Role]Origin
+	// Sources records which layer supplied each profile field, keyed by its
+	// YAML name, so `jade config show` can say where a value came from.
+	Sources map[string]string
 }
+
+// knownStrictness are the review_strictness values jade understands.
+var knownStrictness = []string{StrictnessNormal, StrictnessStrict}
 
 // knownGitHosts are the issue/PR backends jade can talk to. Only GitHub is
 // implemented; an unknown host must fail at load rather than deep inside a
@@ -44,36 +78,133 @@ func Roles() []Role {
 	}
 }
 
-// Load reads the local config file, selects the active profile, validates it,
-// and merges role defaults with any profile-level overrides.
+// Load resolves the configuration for this machine, in order: built-in role
+// defaults, the profile this repo ships, then the local config file. A unit of
+// work layers on top of the result via ApplyUnit.
+//
+// A machine with no local config is not an error. The shipped profiles are the
+// point: a fresh laptop gets the same environment from the repo alone, and
+// ~/.config/jade/config.yml only has to carry what the repo cannot know.
 func Load() (*Resolved, error) {
 	path, err := Path()
 	if err != nil {
 		return nil, err
 	}
 
+	var (
+		local    Profile
+		hasLocal bool
+		name     = DefaultProfileName
+	)
+
 	cfg, err := ReadFile(path)
+	switch {
+	case err == nil:
+		hasLocal = true
+		p, err := cfg.ActiveProfileOrError()
+		if err != nil {
+			return nil, err
+		}
+		local, name = *p, p.Name
+	case errors.Is(err, ErrNoConfig):
+		// First run on this machine: the shipped profiles stand alone.
+	default:
+		return nil, err
+	}
+
+	shipped, _, err := ShippedProfile(name)
 	if err != nil {
 		return nil, err
 	}
 
-	profile, err := cfg.ActiveProfileOrError()
-	if err != nil {
-		return nil, err
-	}
-
+	profile, sources := MergeProfile(shipped, local)
 	if err := profile.Validate(); err != nil {
 		return nil, fmt.Errorf("profile %q: %w", profile.Name, err)
 	}
 
-	agents, origins := MergeAgents(DefaultAgents(), profile.Agents, LayerProfile)
+	agents, origins := MergeAgents(DefaultAgents(), shipped.Agents, LayerShipped)
+	agents, origins = layerAgents(agents, origins, local.Agents, LayerProfile)
 
 	return &Resolved{
 		ConfigPath: path,
-		Profile:    *profile,
+		HasLocal:   hasLocal,
+		Profile:    profile,
 		Agents:     agents,
 		Origins:    origins,
+		Sources:    sources,
 	}, nil
+}
+
+// MergeProfile layers a local profile over the shipped one, field by field, and
+// records where each surviving value came from. A field the local profile
+// leaves empty keeps the shipped value, so the local file stays a short list of
+// what is genuinely specific to this machine.
+func MergeProfile(shipped, local Profile) (Profile, map[string]string) {
+	sources := make(map[string]string, len(ProfileFields()))
+
+	pick := func(field, shippedVal, localVal string) string {
+		if localVal != "" {
+			sources[field] = LayerProfile
+			return localVal
+		}
+		if shippedVal != "" {
+			sources[field] = LayerShipped
+			return shippedVal
+		}
+		sources[field] = LayerDefault
+		return ""
+	}
+	pickList := func(field string, shippedVal, localVal []string) []string {
+		if len(localVal) > 0 {
+			sources[field] = LayerProfile
+			return localVal
+		}
+		if len(shippedVal) > 0 {
+			sources[field] = LayerShipped
+			return shippedVal
+		}
+		sources[field] = LayerDefault
+		return nil
+	}
+
+	p := Profile{Name: local.Name}
+	if p.Name == "" {
+		p.Name = shipped.Name
+	}
+	p.GitHost = pick(FieldGitHost, shipped.GitHost, local.GitHost)
+	p.DiscoverySink = pick(FieldDiscoverySink, shipped.DiscoverySink, local.DiscoverySink)
+	p.AllowedVendors = pickList(FieldAllowedVendors, shipped.AllowedVendors, local.AllowedVendors)
+	p.ProtectedPaths = pickList(FieldProtectedPaths, shipped.ProtectedPaths, local.ProtectedPaths)
+
+	p.ReviewStrictness = pick(FieldReviewStrictness, shipped.ReviewStrictness, local.ReviewStrictness)
+	if p.ReviewStrictness == "" {
+		// Normal everywhere unless a profile says otherwise.
+		p.ReviewStrictness = StrictnessNormal
+	}
+
+	sources[FieldAgentArgs] = LayerDefault
+	switch {
+	case len(local.AgentArgs) > 0:
+		p.AgentArgs, sources[FieldAgentArgs] = local.AgentArgs, LayerProfile
+	case len(shipped.AgentArgs) > 0:
+		p.AgentArgs, sources[FieldAgentArgs] = shipped.AgentArgs, LayerShipped
+	}
+
+	// Keep the merged role pins so Validate can check them against the
+	// vendors this machine allows. Roles nobody pinned are dropped rather
+	// than carried around as empty entries.
+	merged, _ := MergeAgents(shipped.Agents, local.Agents, LayerProfile)
+	for role, agent := range merged {
+		if agent == (Agent{}) {
+			continue
+		}
+		if p.Agents == nil {
+			p.Agents = make(map[Role]Agent, len(merged))
+		}
+		p.Agents[role] = agent
+	}
+
+	return p, sources
 }
 
 // ActiveProfileOrError returns the profile named by active_profile.
@@ -117,7 +248,10 @@ func (p *Profile) Validate() error {
 	if p.DiscoverySink == "" {
 		return fmt.Errorf(`discovery_sink is required ("repo", or a path to a notes directory)`)
 	}
-	if p.DiscoverySink != SinkRepo {
+	if !slices.Contains(knownStrictness, p.ReviewStrictness) && p.ReviewStrictness != "" {
+		return fmt.Errorf("review_strictness %q is not supported (known: %v)", p.ReviewStrictness, knownStrictness)
+	}
+	if p.DiscoverySink != SinkRepo && p.DiscoverySink != SinkVault {
 		info, err := os.Stat(p.DiscoverySink)
 		if err != nil {
 			return fmt.Errorf("discovery_sink %q is not readable: %w", p.DiscoverySink, err)
@@ -167,19 +301,34 @@ func MergeAgents(base map[Role]Agent, override map[Role]Agent, layer string) (ma
 	return agents, origins
 }
 
-// ArgsFor returns the native agent flags configured for a role on this machine.
-func (r *Resolved) ArgsFor(role Role) []string {
-	return r.Profile.AgentArgs[role]
+// Minus returns the part of p that is not already in base — what a local config
+// actually has to write down. A local file that restated its shipped profile
+// would make `jade config show` report every value as machine-specific, which
+// is the one thing that table exists to tell you.
+func (p Profile) Minus(base Profile) Profile {
+	if p.GitHost == base.GitHost {
+		p.GitHost = ""
+	}
+	if p.DiscoverySink == base.DiscoverySink {
+		p.DiscoverySink = ""
+	}
+	if p.ReviewStrictness == base.ReviewStrictness {
+		p.ReviewStrictness = ""
+	}
+	if slices.Equal(p.AllowedVendors, base.AllowedVendors) {
+		p.AllowedVendors = nil
+	}
+	if slices.Equal(p.ProtectedPaths, base.ProtectedPaths) {
+		p.ProtectedPaths = nil
+	}
+	return p
 }
 
-// ApplyUnit layers a unit-of-work's per-role overrides onto an already-resolved
-// config, returning a copy. Used by the build loop when an issue's YAML block
-// pins a different model or effort for one unit.
-func (r *Resolved) ApplyUnit(override map[Role]Agent) *Resolved {
-	agents, origins := MergeAgents(r.Agents, override, LayerUnit)
-
-	// Preserve the layer that supplied each value the unit did not override.
-	for role, prev := range r.Origins {
+// layerAgents applies one more layer of overrides to an already-layered set,
+// preserving the provenance of every field the new layer leaves alone.
+func layerAgents(base map[Role]Agent, baseOrigins map[Role]Origin, override map[Role]Agent, layer string) (map[Role]Agent, map[Role]Origin) {
+	agents, origins := MergeAgents(base, override, layer)
+	for role, prev := range baseOrigins {
 		next := origins[role]
 		if next.Vendor == LayerDefault {
 			next.Vendor = prev.Vendor
@@ -192,6 +341,26 @@ func (r *Resolved) ApplyUnit(override map[Role]Agent) *Resolved {
 		}
 		origins[role] = next
 	}
+	return agents, origins
+}
+
+// Strict reports whether this machine refuses to merge its own work. It is a
+// property of where the code is, not of the unit: an employer's review culture
+// outranks a plan-time autonomy dial.
+func (r *Resolved) Strict() bool {
+	return r.Profile.ReviewStrictness == StrictnessStrict
+}
+
+// ArgsFor returns the native agent flags configured for a role on this machine.
+func (r *Resolved) ArgsFor(role Role) []string {
+	return r.Profile.AgentArgs[role]
+}
+
+// ApplyUnit layers a unit-of-work's per-role overrides onto an already-resolved
+// config, returning a copy. Used by the build loop when an issue's YAML block
+// pins a different model or effort for one unit.
+func (r *Resolved) ApplyUnit(override map[Role]Agent) *Resolved {
+	agents, origins := layerAgents(r.Agents, r.Origins, override, LayerUnit)
 
 	clone := *r
 	clone.Agents = agents
@@ -211,6 +380,11 @@ const RepoDiscoveryDir = "docs/discovery"
 // note itself is identical either way.
 func (r *Resolved) ResolveSink(repoRoot string) (string, error) {
 	dir := r.Profile.DiscoverySink
+	if dir == SinkVault {
+		// The shipped profile says notes belong in a notes vault, but the
+		// repo is public and cannot hold anyone's vault path.
+		return "", fmt.Errorf("profile %q writes discovery notes to a notes vault, but no path is set — run: jade init", r.Profile.Name)
+	}
 	if dir == SinkRepo {
 		if repoRoot == "" {
 			return "", fmt.Errorf("profile %q writes discovery notes into the repo, but this is not a repository", r.Profile.Name)

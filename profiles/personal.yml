@@ -1,0 +1,21 @@
+# The personal laptop: my own repos, my own notes.
+#
+# Shipped profiles hold only what is true on every machine of this kind. They
+# are committed to a public repo, so nothing here may name a path, a client, or
+# a machine — `jade init` asks for those and writes them to
+# ~/.config/jade/config.yml, which is never committed.
+name: personal
+git_host: github
+
+# Discovery notes belong in a notes vault here, not in the repo — an idea
+# usually arrives before there is a repo to put it in. The path is personal, so
+# the local config supplies it.
+discovery_sink: vault
+
+allowed_vendors:
+  - claude
+  - codex
+  - gemini
+
+# Nothing here is anyone else's to lose.
+review_strictness: normal

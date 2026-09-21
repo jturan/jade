@@ -142,6 +142,9 @@ type Deps struct {
 	// ProtectedPaths force a gate regardless of autonomy. Empty means the
 	// built-in defaults.
 	ProtectedPaths []string
+	// Strict is the profile's review_strictness: when true, nothing merges
+	// itself on this machine.
+	Strict bool
 	// AutoMergesSoFar and MaxAutoMerges cap unattended merges per run.
 	AutoMergesSoFar int
 	MaxAutoMerges   int
@@ -325,6 +328,7 @@ func runUnitBody(
 		}
 		decision := DecideAutonomy(AutonomyInput{
 			Level:           level,
+			Strict:          d.Strict,
 			SecurityReview:  unit.SecurityReview,
 			Attempts:        attempt,
 			TestsRun:        report.TestsRun,

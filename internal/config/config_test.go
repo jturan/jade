@@ -295,3 +295,125 @@ func TestApplyUnitCannotChangeAgentArgs(t *testing.T) {
 		t.Errorf("unit override changed agent args: %v", got.ArgsFor(RoleBuilder))
 	}
 }
+
+// A shipped profile can describe the shape of a sink but never the path to
+// one, so a machine that has not run init must say so plainly rather than
+// writing notes somewhere surprising.
+func TestResolveSinkVaultWithoutPathFails(t *testing.T) {
+	r := &Resolved{Profile: Profile{Name: "personal", DiscoverySink: SinkVault}}
+
+	_, err := r.ResolveSink(t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error when no vault path is set")
+	}
+	if !strings.Contains(err.Error(), "jade init") {
+		t.Errorf("the error should say how to fix it: %v", err)
+	}
+}
+
+func TestMergeProfilePrefersLocal(t *testing.T) {
+	shipped := Profile{
+		Name:             "dayjob",
+		GitHost:          "github",
+		DiscoverySink:    SinkRepo,
+		AllowedVendors:   []string{"claude"},
+		ReviewStrictness: StrictnessStrict,
+	}
+
+	// An empty local profile leaves the shipped values, and every one of them
+	// is reported as shipped.
+	merged, sources := MergeProfile(shipped, Profile{})
+	if merged.DiscoverySink != SinkRepo || merged.ReviewStrictness != StrictnessStrict {
+		t.Fatalf("shipped values were not carried through: %+v", merged)
+	}
+	for _, field := range []string{FieldGitHost, FieldDiscoverySink, FieldAllowedVendors, FieldReviewStrictness} {
+		if sources[field] != LayerShipped {
+			t.Errorf("%s came from %q, want %q", field, sources[field], LayerShipped)
+		}
+	}
+	// Nothing supplied protected_paths, so the built-in defaults apply.
+	if sources[FieldProtectedPaths] != LayerDefault {
+		t.Errorf("protected_paths came from %q, want %q", sources[FieldProtectedPaths], LayerDefault)
+	}
+
+	merged, sources = MergeProfile(shipped, Profile{
+		Name:             "dayjob",
+		DiscoverySink:    "/notes",
+		ReviewStrictness: StrictnessNormal,
+	})
+	if merged.DiscoverySink != "/notes" || sources[FieldDiscoverySink] != LayerProfile {
+		t.Errorf("local sink did not win: %q from %q", merged.DiscoverySink, sources[FieldDiscoverySink])
+	}
+	if merged.ReviewStrictness != StrictnessNormal || sources[FieldReviewStrictness] != LayerProfile {
+		t.Error("a machine must be able to relax its own strictness locally")
+	}
+	// Untouched fields keep coming from the repo.
+	if merged.GitHost != "github" || sources[FieldGitHost] != LayerShipped {
+		t.Errorf("git_host = %q from %q", merged.GitHost, sources[FieldGitHost])
+	}
+}
+
+// review_strictness defaults to normal wherever nobody says otherwise.
+func TestMergeProfileDefaultsStrictnessToNormal(t *testing.T) {
+	merged, sources := MergeProfile(Profile{Name: "custom"}, Profile{})
+	if merged.ReviewStrictness != StrictnessNormal {
+		t.Errorf("review_strictness = %q, want %q", merged.ReviewStrictness, StrictnessNormal)
+	}
+	if sources[FieldReviewStrictness] != LayerDefault {
+		t.Errorf("source = %q, want %q", sources[FieldReviewStrictness], LayerDefault)
+	}
+}
+
+// Role pins come from both layers and are still checked against the vendors
+// this machine allows — a local pin must not smuggle in a banned vendor.
+func TestMergeProfileValidatesRolePinsFromEitherLayer(t *testing.T) {
+	shipped := Profile{
+		Name:           "dayjob",
+		GitHost:        "github",
+		DiscoverySink:  SinkRepo,
+		AllowedVendors: []string{"claude"},
+	}
+	merged, _ := MergeProfile(shipped, Profile{
+		Name:   "dayjob",
+		Agents: map[Role]Agent{RoleBuilder: {Vendor: "codex"}},
+	})
+	if err := merged.Validate(); err == nil {
+		t.Fatal("expected a local pin to a disallowed vendor to be rejected")
+	}
+}
+
+// The local file records only what differs, so `jade config show` can tell a
+// machine-specific value from an inherited one.
+func TestProfileMinusDropsInheritedValues(t *testing.T) {
+	shipped := Profile{
+		Name:             "consulting",
+		GitHost:          "github",
+		DiscoverySink:    SinkRepo,
+		AllowedVendors:   []string{"claude", "codex"},
+		ReviewStrictness: StrictnessNormal,
+	}
+	local := shipped
+	local.DiscoverySink = "/notes"
+
+	got := local.Minus(shipped)
+	if got.DiscoverySink != "/notes" {
+		t.Errorf("sink = %q, want the local value", got.DiscoverySink)
+	}
+	if got.GitHost != "" || got.AllowedVendors != nil || got.ReviewStrictness != "" {
+		t.Errorf("inherited values were written down anyway: %+v", got)
+	}
+}
+
+func TestValidateRejectsUnknownStrictness(t *testing.T) {
+	p := Profile{
+		Name:             "personal",
+		GitHost:          "github",
+		DiscoverySink:    SinkRepo,
+		AllowedVendors:   []string{"claude"},
+		ReviewStrictness: "paranoid",
+	}
+	err := p.Validate()
+	if err == nil || !strings.Contains(err.Error(), "review_strictness") {
+		t.Fatalf("error = %v, want it to name review_strictness", err)
+	}
+}

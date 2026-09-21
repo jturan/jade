@@ -396,6 +396,38 @@ func TestAutonomousUnitMergesAndRecordsWhy(t *testing.T) {
 	}
 }
 
+// On a strict machine the same clean run stops at the pull request. This is the
+// difference between an employer's laptop and a personal one.
+func TestStrictProfileStopsAnAutoMerge(t *testing.T) {
+	root := t.TempDir()
+	agent := &fakeAgent{root: root, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	git := &fakeGit{clean: true, changes: true}
+	store := &fakeStore{}
+
+	unit := testUnit()
+	unit.Autonomy = state.AutonomyMerge
+
+	deps := newDeps(t, agent, git, store)
+	deps.Strict = true
+
+	res, err := RunUnit(context.Background(), deps, testIssue(), unit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Outcome != OutcomePR {
+		t.Fatalf("outcome = %q, want pr: %s", res.Outcome, res.Autonomy.Reason)
+	}
+	if len(git.merged) != 0 {
+		t.Error("a strict profile merged unattended")
+	}
+	if !strings.Contains(res.Autonomy.Reason, "strict") {
+		t.Errorf("reason = %q, want it to name strictness", res.Autonomy.Reason)
+	}
+}
+
 // A protected path gates the merge even when autonomy would allow it.
 func TestAutonomousUnitStopsOnProtectedPath(t *testing.T) {
 	root := t.TempDir()
