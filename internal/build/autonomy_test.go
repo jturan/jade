@@ -46,6 +46,11 @@ func TestDecideAutonomyGuardrails(t *testing.T) {
 			"gated",
 		},
 		{
+			"strict review stops a merge the autonomy level would allow",
+			func(in *AutonomyInput) { in.Strict = true },
+			"review_strictness is strict",
+		},
+		{
 			"a security-flagged unit is never auto-merged",
 			func(in *AutonomyInput) { in.SecurityReview = true },
 			"security review",
@@ -107,6 +112,22 @@ func TestFullAutonomyStillRespectsGuardrails(t *testing.T) {
 
 	if d := DecideAutonomy(in); d.Merge {
 		t.Errorf("full autonomy bypassed the security guardrail: %s", d.Reason)
+	}
+}
+
+// Strictness is a property of the machine, so the most permissive autonomy
+// level jade offers must not talk its way past it.
+func TestStrictReviewOutranksFullAutonomy(t *testing.T) {
+	in := permitted()
+	in.Level = state.AutonomyFull
+	in.Strict = true
+
+	d := DecideAutonomy(in)
+	if d.Merge {
+		t.Errorf("full autonomy bypassed review_strictness: %s", d.Reason)
+	}
+	if !strings.Contains(d.Reason, "strict") {
+		t.Errorf("reason = %q, want it to name strictness", d.Reason)
 	}
 }
 

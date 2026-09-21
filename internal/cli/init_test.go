@@ -1,13 +1,62 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jturan/jade/internal/config"
+	"github.com/spf13/cobra"
 )
+
+// init starts from the profile the repo ships and writes down only what the
+// repo cannot know. A local file that restated the shipped values would fork
+// from them silently the next time one of them changed.
+func TestCollectProfileRecordsOnlyWhatIsLocal(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetErr(io.Discard)
+
+	p, err := collectProfile(cmd, "dayjob", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "dayjob" {
+		t.Fatalf("name = %q", p.Name)
+	}
+	if p.GitHost != "" || len(p.AllowedVendors) != 0 || p.ReviewStrictness != "" {
+		t.Errorf("shipped values were copied into the local profile: %+v", p)
+	}
+	// dayjob writes notes into the repo, so there is no path to ask for.
+	if p.DiscoverySink != "" {
+		t.Errorf("discovery_sink = %q, want it left to the shipped profile", p.DiscoverySink)
+	}
+
+	shipped, _, err := config.ShippedProfile("dayjob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _ := config.MergeProfile(shipped, *p)
+	if merged.ReviewStrictness != config.StrictnessStrict {
+		t.Errorf("resolved strictness = %q, want the shipped %q", merged.ReviewStrictness, config.StrictnessStrict)
+	}
+}
+
+// A personal machine keeps its notes in a vault the repo cannot name, so that
+// is the one thing init has to settle.
+func TestCollectProfileSettlesTheVaultPath(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetErr(io.Discard)
+
+	p, err := collectProfile(cmd, "personal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.DiscoverySink == "" || p.DiscoverySink == config.SinkVault {
+		t.Errorf("discovery_sink = %q — init must resolve the placeholder", p.DiscoverySink)
+	}
+}
 
 // Running init twice must add a second profile, not destroy the first. The
 // three-laptop setup depends on one config holding several profiles.

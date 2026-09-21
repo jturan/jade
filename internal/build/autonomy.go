@@ -43,6 +43,9 @@ type AutonomyDecision struct {
 // struct makes the rule set testable without a repo, a plan, or an agent.
 type AutonomyInput struct {
 	Level state.Autonomy
+	// Strict is the profile's review_strictness. Under strict nothing merges
+	// itself here, whatever the unit's autonomy says.
+	Strict bool
 	// SecurityReview is the human's plan-time decision for this unit.
 	SecurityReview bool
 	// Attempts is how many builder attempts the unit took. More than one
@@ -68,6 +71,13 @@ func DecideAutonomy(in AutonomyInput) AutonomyDecision {
 	case state.AutonomyMerge, state.AutonomyFull:
 	default:
 		return AutonomyDecision{Reason: "autonomy is gated — merging is yours"}
+	}
+
+	// Strictness is a property of where the code lives, not of the unit. An
+	// employer's review culture outranks a plan-time dial, so this is checked
+	// before anything the unit gets a say in.
+	if in.Strict {
+		return AutonomyDecision{Reason: "review_strictness is strict — merging is yours"}
 	}
 
 	// A human decided at the plan gate that this unit warranted a security

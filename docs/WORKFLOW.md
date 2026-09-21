@@ -31,9 +31,16 @@ jade init      # generate ~/.config/jade/config.yml
 Run it first on a new machine — it fails fast and legibly, which is the whole
 point.
 
-`init` asks which profile this machine is (personal, consulting, day job), where
-your repos live, and where discovery notes should be written. That file is
-machine-local and never committed.
+`init` asks which profile this machine is (personal, consulting, day job) and
+then starts from the copy of that profile in [`profiles/`](../profiles). It only
+asks for what the repo cannot know — where your notes vault is, where your repos
+live — and writes just that to `~/.config/jade/config.yml`. That file is
+machine-local and never committed; everything it does not mention keeps coming
+from the repo, so changing a shipped default changes every laptop at once.
+
+`jade config show` prints each setting with the layer it came from — `default`,
+`shipped`, `profile`, or `unit` — so a machine behaving unexpectedly can be
+diagnosed in one command.
 
 ### Letting agents work without approval prompts
 
@@ -223,6 +230,9 @@ with `--all`.
   was decided before anyone knew it would struggle;
 - it touches a protected path (migrations, auth, CI, secrets, deploy manifests
   by default; set `protected_paths` per profile to change that);
+- the profile sets `review_strictness: strict`, which means nothing merges
+  itself on this machine whatever a unit's autonomy says — the `dayjob` profile
+  ships that way;
 - the run has already merged `--max-auto-merges` units (default 3), so a bad
   plan cannot land nine pull requests while you are at lunch.
 

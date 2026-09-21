@@ -1,0 +1,18 @@
+# A client laptop: their repos, their notes.
+#
+# Shipped profiles hold only what is true on every machine of this kind. They
+# are committed to a public repo, so nothing here may name a path, a client, or
+# a machine — `jade init` asks for those and writes them to
+# ~/.config/jade/config.yml, which is never committed.
+name: consulting
+git_host: github
+
+# Notes stay with the code they are about, so nothing from a client lands in a
+# personal vault.
+discovery_sink: repo
+
+allowed_vendors:
+  - claude
+  - codex
+
+review_strictness: normal

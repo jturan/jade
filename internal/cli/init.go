@@ -65,6 +65,10 @@ func newInitCmd() *cobra.Command {
 
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "%s wrote %s\n", okStyle.Render("✓"), path)
+			if _, shipped, _ := config.ShippedProfile(p.Name); shipped {
+				fmt.Fprintf(out, "%s\n", dimStyle.Render(fmt.Sprintf(
+					"started from the shipped %s profile — the file records only what differs", p.Name)))
+			}
 			fmt.Fprintf(out, "%s\n", dimStyle.Render(fmt.Sprintf(
 				"active profile: %s · %d profile(s) configured", cfg.ActiveProfile, len(cfg.Profiles))))
 			fmt.Fprintf(out, "%s\n", dimStyle.Render("Check it with: jade config show"))
@@ -84,7 +88,7 @@ func newInitCmd() *cobra.Command {
 func loadExisting(path string) (*config.Config, error) {
 	cfg, err := config.ReadFile(path)
 	if err != nil {
-		if strings.Contains(err.Error(), "no config at") {
+		if errors.Is(err, config.ErrNoConfig) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("%w\n(use --force to start over)", err)
@@ -92,72 +96,124 @@ func loadExisting(path string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// collectProfile asks for the settings describing this machine.
+// collectProfile starts from the profile this repo ships for the chosen name
+// and asks only for what the repo cannot know: paths, and anything the shipped
+// profile leaves blank.
 func collectProfile(cmd *cobra.Command, name string, existing *config.Config) (*config.Profile, error) {
-	p := config.Profile{
-		Name:    name,
-		GitHost: "github",
+	name, err := profileName(cmd, name, existing)
+	if err != nil {
+		return nil, err
 	}
-	if existing != nil && name != "" {
-		// Editing a known profile starts from its current values.
+
+	shipped, _, err := config.ShippedProfile(name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Re-running init should not re-ask what this machine already answered.
+	local := config.Profile{Name: name}
+	if existing != nil {
 		for _, e := range existing.Profiles {
 			if e.Name == name {
-				p = e
+				local = e
 			}
 		}
 	}
-	if p.Name == "" {
-		p.Name = "personal"
+
+	p, _ := config.MergeProfile(shipped, local)
+	if p.GitHost == "" {
+		p.GitHost = "github"
 	}
-	if p.DiscoverySink == "" {
+
+	// A shipped sink of "vault" means "a notes directory, path supplied
+	// locally" — the repo is public and cannot hold anyone's vault path.
+	needSink := p.DiscoverySink == "" || p.DiscoverySink == config.SinkVault
+	if needSink {
 		p.DiscoverySink = defaultSink()
 	}
-	if len(p.AllowedVendors) == 0 {
+	needVendors := len(p.AllowedVendors) == 0
+	if needVendors {
 		p.AllowedVendors = installedVendors()
 	}
 
 	if !interactive() {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s no terminal — writing defaults; edit the file or re-run interactively\n",
 			warnStyle.Render("–"))
-		return &p, nil
+		return trim(p, shipped), nil
 	}
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("What is this machine?").
-				Description("Profiles let one config behave differently per laptop.").
-				Options(
-					huh.NewOption("personal", "personal"),
-					huh.NewOption("consulting", "consulting"),
-					huh.NewOption("dayjob", "dayjob"),
-				).
-				Value(&p.Name),
+	var fields []huh.Field
+	if needSink {
+		fields = append(fields, huh.NewInput().
+			Title("Where do discovery notes go?").
+			Description(`An absolute path, or "repo" to write into docs/discovery/ of the repo being worked on.`).
+			Value(&p.DiscoverySink).
+			Validate(validateSink))
+	}
+	if needVendors {
+		fields = append(fields, huh.NewMultiSelect[string]().
+			Title("Which agents may run here?").
+			Description("Only installed CLIs are listed. A role pinned to an absent vendor fails at load.").
+			Options(vendorOptions(p.AllowedVendors)...).
+			Value(&p.AllowedVendors).
+			Validate(func(v []string) error {
+				if len(v) == 0 {
+					return errors.New("pick at least one — jade cannot dispatch without an agent")
+				}
+				return nil
+			}))
+	}
 
-			huh.NewInput().
-				Title("Where do discovery notes go?").
-				Description(`An absolute path, or "repo" to write into docs/discovery/ of the repo being worked on.`).
-				Value(&p.DiscoverySink).
-				Validate(validateSink),
+	if len(fields) > 0 {
+		if err := huh.NewForm(huh.NewGroup(fields...)).Run(); err != nil {
+			return nil, err
+		}
+	}
+	return trim(p, shipped), nil
+}
 
-			huh.NewMultiSelect[string]().
-				Title("Which agents may run here?").
-				Description("Only installed CLIs are listed. A role pinned to an absent vendor fails at load.").
-				Options(vendorOptions(p.AllowedVendors)...).
-				Value(&p.AllowedVendors).
-				Validate(func(v []string) error {
-					if len(v) == 0 {
-						return errors.New("pick at least one — jade cannot dispatch without an agent")
-					}
-					return nil
-				}),
-		),
-	)
+// profileName asks which machine this is, unless --profile already said.
+func profileName(cmd *cobra.Command, name string, existing *config.Config) (string, error) {
+	if name != "" {
+		return name, nil
+	}
+	chosen := config.DefaultProfileName
+	if existing != nil && existing.ActiveProfile != "" {
+		chosen = existing.ActiveProfile
+	}
+	if !interactive() {
+		return chosen, nil
+	}
 
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("What is this machine?").
+			Description("Each name is a profile this repo ships; the local file only records what differs.").
+			Options(profileOptions()...).
+			Value(&chosen),
+	))
 	if err := form.Run(); err != nil {
-		return nil, err
+		return "", err
 	}
-	return &p, nil
+	return chosen, nil
+}
+
+// trim reduces a resolved profile to the part that is genuinely local, so the
+// config file does not silently fork from the shipped defaults it started with.
+func trim(p, shipped config.Profile) *config.Profile {
+	out := p.Minus(shipped)
+	out.Name = p.Name
+	return &out
+}
+
+// profileOptions lists the profiles the repo ships.
+func profileOptions() []huh.Option[string] {
+	names := config.ShippedNames()
+	opts := make([]huh.Option[string], 0, len(names))
+	for _, n := range names {
+		opts = append(opts, huh.NewOption(n, n))
+	}
+	return opts
 }
 
 // validateSink checks a sink before it is written, so a typo is caught here

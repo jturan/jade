@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,26 @@ const (
 // the repo being worked on" rather than an external notes directory.
 const SinkRepo = "repo"
 
+// SinkVault is the discovery_sink value a shipped profile uses to say "an
+// external notes directory, path supplied locally". The repo is public, so it
+// can describe the shape of a sink but never the path to one.
+const SinkVault = "vault"
+
+// Review strictness governs whether a machine will merge its own work at all.
+const (
+	// StrictnessNormal leaves the merge decision to a unit's autonomy level
+	// and the guardrails around it.
+	StrictnessNormal = "normal"
+	// StrictnessStrict means nothing merges itself here, whatever a unit's
+	// autonomy says. Somewhere with code review as a norm, that is the right
+	// default however well the guardrails hold.
+	StrictnessStrict = "strict"
+)
+
+// ErrNoConfig reports that this machine has no local config yet. That is the
+// normal first-run case, not a failure: the shipped profiles still resolve.
+var ErrNoConfig = errors.New("no local config")
+
 // Agent is the model configuration for a single role.
 type Agent struct {
 	Vendor string `yaml:"vendor"`
@@ -42,9 +63,13 @@ type Profile struct {
 	// GitHost is the issue/PR backend. Only "github" is implemented today.
 	GitHost string `yaml:"git_host"`
 	// DiscoverySink is where discovery notes land: an absolute path to an
-	// Obsidian vault folder, or the literal "repo" to write into
-	// docs/discovery/ of the repo being worked on.
+	// Obsidian vault folder, the literal "repo" to write into docs/discovery/
+	// of the repo being worked on, or the literal "vault" in a shipped profile
+	// that wants a notes directory but cannot know its path.
 	DiscoverySink string `yaml:"discovery_sink"`
+	// ReviewStrictness is "normal" or "strict". Under "strict" a unit may not
+	// auto-merge even when its autonomy level would allow it.
+	ReviewStrictness string `yaml:"review_strictness,omitempty"`
 	// AllowedVendors gates which agent vendors may be dispatched here.
 	AllowedVendors []string `yaml:"allowed_vendors"`
 	// Agents overrides the built-in role defaults for this machine.
@@ -91,7 +116,7 @@ func ReadFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("no config at %s (run: jade init)", path)
+			return nil, fmt.Errorf("%w at %s (run: jade init)", ErrNoConfig, path)
 		}
 		return nil, err
 	}

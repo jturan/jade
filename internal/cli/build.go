@@ -78,7 +78,8 @@ func newBuildCmd() *cobra.Command {
 				autonomy = string(state.AutonomyFull)
 			}
 			if explain {
-				return explainReady(out, ready, target, state.Autonomy(autonomy), protectedPaths())
+				protected, strict := explainGuardrails()
+				return explainReady(out, ready, target, state.Autonomy(autonomy), protected, strict)
 			}
 
 			if yolo {
@@ -127,6 +128,7 @@ func newBuildCmd() *cobra.Command {
 				ReviewTimeout:    reviewTimeout,
 				AutonomyOverride: state.Autonomy(autonomy),
 				ProtectedPaths:   resolved.Profile.ProtectedPaths,
+				Strict:           resolved.Strict(),
 				MaxAutoMerges:    maxAutoMerges,
 				Recorder:         recorder,
 				Repo:             repo,
@@ -195,7 +197,7 @@ func newBuildCmd() *cobra.Command {
 	return cmd
 }
 
-func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Ready, target state.Ready, override state.Autonomy, protected []string) error {
+func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Ready, target state.Ready, override state.Autonomy, protected []string, strict bool) error {
 	fmt.Fprintf(out, "%d unit(s) ready. Next: #%d %s\n\n",
 		len(ready), target.Issue.Number, target.Issue.Title)
 
@@ -214,6 +216,7 @@ func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Rea
 	// case: this is the ceiling, not a promise.
 	decision := build.DecideAutonomy(build.AutonomyInput{
 		Level:          level,
+		Strict:         strict,
 		SecurityReview: target.Unit.SecurityReview,
 		Attempts:       1,
 		TestsRun:       true,
@@ -238,14 +241,15 @@ func explainReady(out interface{ Write([]byte) (int, error) }, ready []state.Rea
 	return nil
 }
 
-// protectedPaths reads the active profile's protected globs, falling back to
-// the built-in defaults. Explain must not fail just because config is missing.
-func protectedPaths() []string {
+// explainGuardrails reads the profile settings that shape the merge decision,
+// falling back to the built-in defaults. Explain is a dry run and must not fail
+// just because config is missing.
+func explainGuardrails() ([]string, bool) {
 	resolved, err := config.Load()
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	return resolved.Profile.ProtectedPaths
+	return resolved.Profile.ProtectedPaths, resolved.Strict()
 }
 
 func orDefault(s string) string {
