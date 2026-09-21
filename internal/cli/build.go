@@ -255,9 +255,20 @@ func orDefault(s string) string {
 	return s
 }
 
+// paneRunner is the slice of runner.Runner herdrAgent uses. An interface so
+// tests can drive Dispatch without a live herdr server.
+type paneRunner interface {
+	AgentPane(ctx context.Context, workspaceID, tabLabel, cwd string) (runner.Pane, error)
+	ClosePane(ctx context.Context, paneID string) error
+	StartAgent(ctx context.Context, opts runner.StartOpts) error
+	Prompt(ctx context.Context, target, text string, wait bool, timeout time.Duration) error
+	GetAgent(ctx context.Context, target string) (runner.Agent, error)
+	Notify(ctx context.Context, title, body string) error
+}
+
 // herdrAgent dispatches build.Dispatch requests into herdr panes.
 type herdrAgent struct {
-	r           *runner.Runner
+	r           paneRunner
 	workspaceID string
 	tab         string
 	cwd         string
@@ -270,6 +281,7 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 			d.Role, d.Vendor, h.allowed)
 	}
 
+	started := time.Now()
 	pane, err := h.r.AgentPane(ctx, h.workspaceID, h.tab, h.cwd)
 	if err != nil {
 		return fmt.Errorf("preparing a pane for %s: %w", d.Role, err)
@@ -292,7 +304,38 @@ func (h *herdrAgent) Dispatch(ctx context.Context, d build.Dispatch) error {
 		}
 		return err
 	}
-	return nil
+
+	// --wait returns on the first settled state herdr observes, which can be a
+	// pause mid-task. Closing the pane then would kill a working agent, so
+	// hold it open until the agent has actually reported.
+	if d.ReportPath == "" {
+		return nil
+	}
+	return build.AwaitReport(ctx, d.ReportPath, awaitDeadline(started, d.Timeout), h.gone(d.Name))
+}
+
+// awaitDeadline bounds the wait for an agent's report by the role's own
+// timeout, measured from the start of the run. A zero timeout says the agent
+// may work as long as it likes and gets no deadline: capping it here would
+// make "no timeout" mean less time than the default, and the pane is not left
+// on a dead agent regardless — the gone probe ends that wait.
+func awaitDeadline(started time.Time, timeout time.Duration) time.Time {
+	if timeout > 0 {
+		return started.Add(timeout)
+	}
+	return time.Time{}
+}
+
+// gone reports whether herdr has no such agent any more — it exited, or its
+// pane died. That is the one trustworthy sign an agent has stopped for good:
+// a settled state is not, because `agent prompt --wait` returns on settled
+// states that turn out to be pauses mid-task. Any other error is a failure to
+// ask rather than an answer, so it counts as the agent still being there.
+func (h *herdrAgent) gone(name string) func(context.Context) bool {
+	return func(ctx context.Context) bool {
+		_, err := h.r.GetAgent(ctx, name)
+		return runner.HasCode(err, runner.CodeAgentNotFound)
+	}
 }
 
 func (h *herdrAgent) Notify(ctx context.Context, title, body string) error {

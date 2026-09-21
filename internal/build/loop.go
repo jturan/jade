@@ -20,6 +20,7 @@ func (d Deps) record(e telemetry.Event) {
 
 // dispatchAndRecord runs an agent, times it, and records the outcome.
 func dispatchAndRecord(ctx context.Context, d Deps, disp Dispatch, unit int, attempt int, reportPath string) (Report, error) {
+	disp.ReportPath = reportPath
 	started := time.Now()
 	err := d.Agent.Dispatch(ctx, disp)
 
@@ -60,8 +61,13 @@ func dispatchAndRecord(ctx context.Context, d Deps, disp Dispatch, unit int, att
 	return report, nil
 }
 
-// Agent dispatches one agent and waits for it to settle. The loop does not care
+// Agent dispatches one agent and waits for it to finish. The loop does not care
 // whether that happens in a herdr pane or anywhere else.
+//
+// Dispatch must not return while the agent is still working: the loop reads the
+// report and records the duration as soon as it does. Implementations whose
+// own completion signal can fire early should call AwaitReport before
+// returning.
 type Agent interface {
 	Dispatch(ctx context.Context, d Dispatch) error
 	Notify(ctx context.Context, title, body string) error
@@ -73,11 +79,13 @@ type Dispatch struct {
 	Name string
 	Role config.Role
 	// Vendor, Model and Effort come from the resolved config for this unit.
-	Vendor  string
-	Model   string
-	Effort  string
-	Prompt  string
-	Timeout time.Duration
+	Vendor string
+	Model  string
+	Effort string
+	Prompt string
+	// ReportPath is where the agent will write its report.
+	ReportPath string
+	Timeout    time.Duration
 	// Args are native flags for the agent CLI, from the profile.
 	Args []string
 }

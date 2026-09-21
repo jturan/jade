@@ -139,3 +139,20 @@ func TestForUnitIsChronological(t *testing.T) {
 		t.Errorf("first event = %q, want the earlier builder run", got[0].Role)
 	}
 }
+
+// A run that never produced a verdict is a harness failure, and its duration
+// says nothing about the model. Recording it as one would let a single dead
+// agent drag a model's mean duration by its whole role timeout.
+func TestHarnessErrorsAreLeftOutOfTheMeanDuration(t *testing.T) {
+	stats := Summarize([]Event{
+		{Role: "code_review", Model: "sonnet", Outcome: OutcomeOK, Seconds: 100},
+		{Role: "code_review", Model: "sonnet", Outcome: OutcomeBlocked, Seconds: 200},
+		{Role: "code_review", Model: "sonnet", Outcome: OutcomeError, Seconds: 1200},
+	})
+	if len(stats) != 1 {
+		t.Fatalf("got %d groups, want 1", len(stats))
+	}
+	if got := stats[0].MeanSeconds(); got != 150 {
+		t.Errorf("mean = %.1fs, want 150 — the timed-out run must not count", got)
+	}
+}

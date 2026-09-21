@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jturan/jade/internal/config"
 	"github.com/jturan/jade/internal/state"
+	"github.com/jturan/jade/internal/telemetry"
 )
 
 // fakeAgent writes a scripted report each time it is dispatched, standing in
@@ -22,6 +25,10 @@ type fakeAgent struct {
 	calls     []Dispatch
 	notified  []string
 	notifyErr error
+	// reportDelay stands in for the gap the Agent contract exists to cover:
+	// a runner whose completion signal fires before the agent is done, and a
+	// Dispatch that holds until it really is.
+	reportDelay time.Duration
 }
 
 func (f *fakeAgent) Dispatch(_ context.Context, d Dispatch) error {
@@ -34,20 +41,27 @@ func (f *fakeAgent) Dispatch(_ context.Context, d Dispatch) error {
 	report := queue[0]
 	f.scripts[d.Role] = queue[1:]
 
-	role := string(d.Role)
-	if d.Role == config.RoleBuilder {
-		role = "builder"
+	// A real agent only knows where to write because the dispatch says so;
+	// write there rather than to a path of the fake's own making, so a loop
+	// that stops passing one fails here.
+	if d.ReportPath == "" {
+		return fmt.Errorf("dispatch for %s carries no report path", d.Role)
 	}
-	path := ReportPath(f.root, role)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(d.ReportPath), 0o755); err != nil {
 		return err
 	}
 	data, err := json.Marshal(report)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	time.Sleep(f.reportDelay)
+	return os.WriteFile(d.ReportPath, data, 0o644)
 }
+
+// fakeRecorder keeps telemetry events in memory.
+type fakeRecorder struct{ events []telemetry.Event }
+
+func (r *fakeRecorder) Record(e telemetry.Event) { r.events = append(r.events, e) }
 
 func (f *fakeAgent) Notify(_ context.Context, title, _ string) error {
 	f.notified = append(f.notified, title)
@@ -547,5 +561,39 @@ func TestStaleReportIsCleared(t *testing.T) {
 	_, err := RunUnit(context.Background(), newDeps(t, agent, &fakeGit{clean: true, changes: true}, &fakeStore{}), testIssue(), testUnit())
 	if err == nil || !strings.Contains(err.Error(), "no report") {
 		t.Fatalf("a stale report was read as this attempt's result: %v", err)
+	}
+}
+
+// The recorded duration must cover the work an agent does after its runner
+// calls it settled, not stop at the early signal. This is the number model
+// and effort choices are made from, so a short one is worse than none.
+func TestDurationCoversWorkAfterTheRunnerSettles(t *testing.T) {
+	root := t.TempDir()
+	delay := 200 * time.Millisecond
+	agent := &fakeAgent{root: root, reportDelay: delay, scripts: map[config.Role][]Report{
+		config.RoleBuilder:    {ok("built")},
+		config.RoleCodeReview: {ok("fine")},
+	}}
+	rec := &fakeRecorder{}
+	d := newDeps(t, agent, &fakeGit{clean: true, changes: true}, &fakeStore{})
+	d.Recorder = rec
+
+	if _, err := RunUnit(context.Background(), d, testIssue(), testUnit()); err != nil {
+		t.Fatal(err)
+	}
+
+	var runs int
+	for _, e := range rec.events {
+		if e.Role == telemetry.RoleUnit {
+			continue
+		}
+		runs++
+		if e.Seconds < delay.Seconds() {
+			t.Errorf("%s recorded %.3fs, short of the %s it spent working",
+				e.Role, e.Seconds, delay)
+		}
+	}
+	if runs == 0 {
+		t.Fatal("no agent runs were recorded")
 	}
 }
